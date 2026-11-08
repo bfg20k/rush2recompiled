@@ -4,6 +4,8 @@
 #include <cstdio>
 #include <cstring>
 
+// STB_IMAGE_STATIC keeps these private: RT64 (rt64.a) already exports its own stbi_* symbols and they clashed at link time.
+#define STB_IMAGE_STATIC
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
 #define STBI_ONLY_JPEG
