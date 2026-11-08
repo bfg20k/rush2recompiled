@@ -27,6 +27,13 @@ if (WIN32)
     set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/lib/")
 endif()
 
+# Fast3D renderer work (docs/fast3d_port_plan.md). Off by default: this only builds the Fast3D core library and its
+# offline test; the game still renders with RT64.
+option(RUSH2_FAST3D "Build the embedded Fast3D core and its offline test" OFF)
+if (RUSH2_FAST3D)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/lib/fast3d ${CMAKE_BINARY_DIR}/fast3d)
+endif()
+
 set(RT64_STATIC TRUE)
 set(RT64_SDL_WINDOW_VULKAN TRUE)
 add_compile_definitions(
