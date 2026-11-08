@@ -1,6 +1,7 @@
-// OpenGL 3.3 core backend for the embedded Fast3D core. Adapted from the OpenGL backend of Emill/n64-fast3d-engine
+// OpenGL 3.3 core / 2.1 backend for the embedded Fast3D core. Adapted from the OpenGL backend of Emill/n64-fast3d-engine
 // (see LICENSE.txt in this folder). Differences from upstream:
-//  - core profile: GLSL 330 with fixed attribute locations and one vertex array object, instead of GLSL 110;
+//  - core profile: GLSL 330 with fixed attribute locations and one vertex array object, instead of GLSL 110; a GLSL 120
+//    flavor (attribute locations bound before linking, VAO optional) serves OpenGL 2.1 contexts;
 //  - no link-time dependency on GL, SDL or GLEW: functions come from a loader passed in by the window layer;
 //  - a shader that fails to compile or link is logged once and skipped, instead of abort();
 //  - shader programs live in a hash table instead of a 64-entry pool (upstream overflowed it silently);
@@ -75,8 +76,7 @@ typedef ptrdiff_t GLsizeiptr;
     X(void, glGenBuffers, (GLsizei n, GLuint *buffers))                                                           \
     X(void, glBindBuffer, (GLenum target, GLuint buffer))                                                         \
     X(void, glBufferData, (GLenum target, GLsizeiptr size, const void *data, GLenum usage))                       \
-    X(void, glGenVertexArrays, (GLsizei n, GLuint *arrays))                                                       \
-    X(void, glBindVertexArray, (GLuint array))                                                                    \
+    X(void, glBindAttribLocation, (GLuint program, GLuint index, const GLchar *name))                             \
     X(void, glEnableVertexAttribArray, (GLuint index))                                                            \
     X(void, glDisableVertexAttribArray, (GLuint index))                                                           \
     X(void, glVertexAttribPointer, (GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const void *pointer)) \
@@ -113,9 +113,21 @@ typedef ptrdiff_t GLsizeiptr;
     X(void, glClearColor, (GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha))                              \
     X(void, glClear, (GLbitfield mask))
 
+// Optional: absent from OpenGL 2.1 drivers without a vertex array object extension. Only the GLSL 120 flavor may go without.
+#define GFXGL_OPTIONAL_FUNCTIONS(X)                                                                               \
+    X(void, glGenVertexArrays, (GLsizei n, GLuint *arrays))                                                       \
+    X(void, glBindVertexArray, (GLuint array))
+
 #define GFXGL_DECLARE(ret, name, params) static ret(GFXGL_APIENTRY *name) params;
 GFXGL_FUNCTIONS(GFXGL_DECLARE)
+GFXGL_OPTIONAL_FUNCTIONS(GFXGL_DECLARE)
 #undef GFXGL_DECLARE
+
+static enum GfxGLSLFlavor selected_flavor = GFX_GLSL_330_CORE;
+
+void gfx_opengl_set_glsl_flavor(enum GfxGLSLFlavor flavor) {
+    selected_flavor = flavor;
+}
 
 bool gfx_opengl_load_functions(GfxGLGetProc get_proc) {
     if (get_proc == NULL) {
@@ -129,6 +141,13 @@ bool gfx_opengl_load_functions(GfxGLGetProc get_proc) {
     }
     GFXGL_FUNCTIONS(GFXGL_LOAD)
 #undef GFXGL_LOAD
+#define GFXGL_LOAD_OPTIONAL(ret, name, params) name = (ret(GFXGL_APIENTRY *) params)get_proc(#name);
+    GFXGL_OPTIONAL_FUNCTIONS(GFXGL_LOAD_OPTIONAL)
+#undef GFXGL_LOAD_OPTIONAL
+    if (selected_flavor != GFX_GLSL_120 && (glGenVertexArrays == NULL || glBindVertexArray == NULL)) {
+        fprintf(stderr, "fast3d: OpenGL function glGenVertexArrays is not available\n");
+        return false;
+    }
     return true;
 }
 
@@ -275,22 +294,43 @@ bool gfx_opengl_build_glsl(uint32_t shader_id, enum GfxGLSLFlavor flavor, struct
         out->num_floats += out->attrib_sizes[i];
     }
 
-    const char *version = flavor == GFX_GLSL_300_ES ? "#version 300 es" : "#version 330 core";
+    const bool legacy = flavor == GFX_GLSL_120;
+    const char *version = flavor == GFX_GLSL_300_ES ? "#version 300 es" : legacy ? "#version 120" : "#version 330 core";
+    const char *vs_in = legacy ? "attribute" : "in";
+    const char *vs_out = legacy ? "varying" : "out";
+    const char *fs_in = legacy ? "varying" : "in";
+    const char *tex_fn = legacy ? "texture2D" : "texture";
+    // Fixed locations: a layout qualifier in the newer dialects, glBindAttribLocation (names recorded here) in GLSL 120.
+    snprintf(out->attrib_names[0], sizeof(out->attrib_names[0]), "aVtxPos");
+    if (tex_loc >= 0) {
+        snprintf(out->attrib_names[tex_loc], sizeof(out->attrib_names[0]), "aTexCoord");
+    }
+    if (fog_loc >= 0) {
+        snprintf(out->attrib_names[fog_loc], sizeof(out->attrib_names[0]), "aFog");
+    }
+    for (int i = 0; i < cc.num_inputs; i++) {
+        snprintf(out->attrib_names[input_loc[i]], sizeof(out->attrib_names[0]), "aInput%d", i + 1);
+    }
+    char loc[32];
 
     // Vertex shader.
     sb_line(&vs, version);
-    sb_line(&vs, "layout(location = 0) in vec4 aVtxPos;");
+    snprintf(loc, sizeof(loc), legacy ? "" : "layout(location = 0) ");
+    sb_printf(&vs, "%s%s vec4 aVtxPos;\n", loc, vs_in);
     if (any_texture) {
-        sb_printf(&vs, "layout(location = %d) in vec2 aTexCoord;\n", tex_loc);
-        sb_line(&vs, "out vec2 vTexCoord;");
+        snprintf(loc, sizeof(loc), legacy ? "" : "layout(location = %d) ", tex_loc);
+        sb_printf(&vs, "%s%s vec2 aTexCoord;\n", loc, vs_in);
+        sb_printf(&vs, "%s vec2 vTexCoord;\n", vs_out);
     }
     if (cc.opt_fog) {
-        sb_printf(&vs, "layout(location = %d) in vec4 aFog;\n", fog_loc);
-        sb_line(&vs, "out vec4 vFog;");
+        snprintf(loc, sizeof(loc), legacy ? "" : "layout(location = %d) ", fog_loc);
+        sb_printf(&vs, "%s%s vec4 aFog;\n", loc, vs_in);
+        sb_printf(&vs, "%s vec4 vFog;\n", vs_out);
     }
     for (int i = 0; i < cc.num_inputs; i++) {
-        sb_printf(&vs, "layout(location = %d) in vec%d aInput%d;\n", input_loc[i], input_size, i + 1);
-        sb_printf(&vs, "out vec%d vInput%d;\n", input_size, i + 1);
+        snprintf(loc, sizeof(loc), legacy ? "" : "layout(location = %d) ", input_loc[i]);
+        sb_printf(&vs, "%s%s vec%d aInput%d;\n", loc, vs_in, input_size, i + 1);
+        sb_printf(&vs, "%s vec%d vInput%d;\n", vs_out, input_size, i + 1);
     }
     sb_line(&vs, "void main() {");
     if (any_texture) {
@@ -312,15 +352,17 @@ bool gfx_opengl_build_glsl(uint32_t shader_id, enum GfxGLSLFlavor flavor, struct
         sb_line(&fs, "precision highp int;");
     }
     if (any_texture) {
-        sb_line(&fs, "in vec2 vTexCoord;");
+        sb_printf(&fs, "%s vec2 vTexCoord;\n", fs_in);
     }
     if (cc.opt_fog) {
-        sb_line(&fs, "in vec4 vFog;");
+        sb_printf(&fs, "%s vec4 vFog;\n", fs_in);
     }
     for (int i = 0; i < cc.num_inputs; i++) {
-        sb_printf(&fs, "in vec%d vInput%d;\n", input_size, i + 1);
+        sb_printf(&fs, "%s vec%d vInput%d;\n", fs_in, input_size, i + 1);
     }
-    sb_line(&fs, "out vec4 fragColor;");
+    if (!legacy) {
+        sb_line(&fs, "out vec4 fragColor;");
+    }
     if (cc.used_textures[0]) {
         sb_line(&fs, "uniform sampler2D uTex0;");
     }
@@ -337,10 +379,10 @@ bool gfx_opengl_build_glsl(uint32_t shader_id, enum GfxGLSLFlavor flavor, struct
     }
     sb_line(&fs, "void main() {");
     if (cc.used_textures[0]) {
-        sb_line(&fs, "vec4 texVal0 = texture(uTex0, vTexCoord);");
+        sb_printf(&fs, "vec4 texVal0 = %s(uTex0, vTexCoord);\n", tex_fn);
     }
     if (cc.used_textures[1]) {
-        sb_line(&fs, "vec4 texVal1 = texture(uTex1, vTexCoord);");
+        sb_printf(&fs, "vec4 texVal1 = %s(uTex1, vTexCoord);\n", tex_fn);
     }
     sb_append(&fs, cc.opt_alpha ? "vec4 texel = " : "vec3 texel = ");
     if (!cc.color_alpha_same && cc.opt_alpha) {
@@ -366,7 +408,7 @@ bool gfx_opengl_build_glsl(uint32_t shader_id, enum GfxGLSLFlavor flavor, struct
     if (noise) {
         sb_line(&fs, "texel.a *= floor(clamp(random(vec3(floor(gl_FragCoord.xy * (240.0 / float(window_height))), float(frame_count))) + texel.a, 0.0, 1.0));");
     }
-    sb_line(&fs, cc.opt_alpha ? "fragColor = texel;" : "fragColor = vec4(texel, 1.0);");
+    sb_printf(&fs, "%s = %s;\n", legacy ? "gl_FragColor" : "fragColor", cc.opt_alpha ? "texel" : "vec4(texel, 1.0)");
     sb_line(&fs, "}");
 
     return !vs.overflow && !fs.overflow;
@@ -469,6 +511,9 @@ static GLuint build_program(const struct GfxGLSL *glsl, uint32_t shader_id) {
     GLuint program = glCreateProgram();
     glAttachShader(program, vs);
     glAttachShader(program, fs);
+    for (int i = 0; i < glsl->num_attribs; i++) {
+        glBindAttribLocation(program, (GLuint)i, glsl->attrib_names[i]); // already fixed by layout() in GLSL 330; needed for 120
+    }
     glLinkProgram(program);
     glDeleteShader(vs);
     glDeleteShader(fs);
@@ -486,7 +531,7 @@ static GLuint build_program(const struct GfxGLSL *glsl, uint32_t shader_id) {
 
 static struct ShaderProgram *gfx_opengl_create_and_load_new_shader(uint32_t shader_id) {
     struct GfxGLSL glsl;
-    bool built = gfx_opengl_build_glsl(shader_id, GFX_GLSL_330_CORE, &glsl);
+    bool built = gfx_opengl_build_glsl(shader_id, selected_flavor, &glsl);
 
     struct ShaderProgram *prg;
     if (shader_count >= SHADER_TABLE_MAX) {
@@ -640,10 +685,23 @@ static void gfx_opengl_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size_
 }
 
 static void gfx_opengl_init(void) {
-    glGenVertexArrays(1, &opengl_vao);
-    glBindVertexArray(opengl_vao);
+    if (glGenVertexArrays != NULL && glBindVertexArray != NULL) {
+        glGenVertexArrays(1, &opengl_vao);
+        glBindVertexArray(opengl_vao);
+    } // else OpenGL 2.1 without a VAO: attribute state is global, and load_shader sets it for each program
     glGenBuffers(1, &opengl_vbo);
     glBindBuffer(GL_ARRAY_BUFFER, opengl_vbo);
+    glDepthFunc(GL_LEQUAL);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+}
+
+void gfx_opengl_restore_state(void) {
+    if (glBindVertexArray != NULL && opengl_vao != 0) {
+        glBindVertexArray(opengl_vao);
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, opengl_vbo);
+    glActiveTexture(GL_TEXTURE0);
+    glEnable(GL_SCISSOR_TEST);
     glDepthFunc(GL_LEQUAL);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 }

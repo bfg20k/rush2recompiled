@@ -1,5 +1,5 @@
 diff --git a/recompui/include/recompui/recompui.h b/recompui/include/recompui/recompui.h
-index 30c463b..056edff 100644
+index 30c463b..acd65fa 100644
 --- a/recompui/include/recompui/recompui.h
 +++ b/recompui/include/recompui/recompui.h
 @@ -3,6 +3,9 @@
@@ -46,7 +46,7 @@ index 30c463b..056edff 100644
      void process_game_started();
  
      void apply_color_hack();
-@@ -104,6 +127,10 @@ namespace recompui {
+@@ -104,9 +127,29 @@ namespace recompui {
      void activate_mouse();
  
      void message_box(const char* msg);
@@ -57,6 +57,25 @@ index 30c463b..056edff 100644
  
      void set_render_hooks();
  
++    // A UI renderer that isn't RT64's (Rush 2 recomp's Fast3D/OpenGL one). init_external_renderer() creates the UI in
++    // place of the RT64 init hook, on the render thread with the GL context current; draw_external() is the draw hook,
++    // called once per presented frame with the drawable size in pixels; deinit_external_renderer() is the deinit hook.
++    // `begin` and `end` bracket the drawing of one frame; `reset` frees the renderer's resources.
++    struct ExternalRenderer {
++        Rml::RenderInterface* rml_interface;
++        void (*begin)(int width, int height);
++        void (*end)();
++        void (*reset)();
++        void (*queue_image_from_bytes_file)(const std::string& src, const std::vector<char>& bytes);
++        void (*queue_image_from_bytes_rgba32)(const std::string& src, const std::vector<char>& bytes, uint32_t width, uint32_t height);
++    };
++    void init_external_renderer(const ExternalRenderer& renderer);
++    void draw_external(int width, int height);
++    void deinit_external_renderer();
++
+     Rml::ElementPtr create_custom_element(Rml::Element* parent, std::string tag);
+     Rml::ElementDocument* load_document(const std::filesystem::path& path);
+     Rml::ElementDocument* create_empty_document();
 diff --git a/recompui/include/recompui/renderer.h b/recompui/include/recompui/renderer.h
 index 33f79ab..da88c33 100644
 --- a/recompui/include/recompui/renderer.h
@@ -96,18 +115,65 @@ index 33f79ab..da88c33 100644
          // The first option is treated as disabled and the second option is treated as enabled.
          bool is_texture_pack_enable_config_option(const recomp::config::ConfigOption& option, bool show_errors);
 diff --git a/recompui/src/base/ui_state.cpp b/recompui/src/base/ui_state.cpp
-index 277a421..4d68b7d 100644
+index 277a421..57d6381 100644
 --- a/recompui/src/base/ui_state.cpp
 +++ b/recompui/src/base/ui_state.cpp
-@@ -5,6 +5,7 @@
+@@ -5,6 +5,8 @@
  #include <SDL2/SDL_video.h>
  #endif
  #include <chrono>
++#include <optional>
 +#include <thread>
  
  #include "rt64_render_hooks.h"
  
-@@ -527,6 +528,12 @@ bool recompui::try_deque_event(SDL_Event& out) {
+@@ -214,6 +216,8 @@ public:
+     int last_active_mouse_position[2] = {0, 0};
+     std::unique_ptr<SystemInterface_SDL> system_interface;
+     recompui::RmlRenderInterface_RT64 render_interface;
++    // Set when something other than RT64 draws the UI (the Fast3D renderer's OpenGL one); render_interface is unused then.
++    std::optional<recompui::ExternalRenderer> external;
+     Rml::Context* context;
+     recompui::UiEventListenerInstancer event_listener_instancer;
+ 
+@@ -222,14 +226,19 @@ public:
+     UIState(UIState&& rhs) = delete;
+     UIState& operator=(UIState&& rhs) = delete;
+ 
+-    UIState(SDL_Window* window, plume::RenderInterface* interface, plume::RenderDevice* device) {
++    UIState(SDL_Window* window, plume::RenderInterface* interface, plume::RenderDevice* device, const recompui::ExternalRenderer* external_renderer = nullptr) {
+ 
+         system_interface = std::make_unique<SystemInterface_SDL>();
+         system_interface->SetWindow(window);
+-        render_interface.init(interface, device);
++        if (external_renderer != nullptr) {
++            external = *external_renderer;
++        }
++        else {
++            render_interface.init(interface, device);
++        }
+ 
+         Rml::SetSystemInterface(system_interface.get());
+-        Rml::SetRenderInterface(render_interface.get_rml_interface());
++        Rml::SetRenderInterface(external ? external->rml_interface : render_interface.get_rml_interface());
+         Rml::Factory::RegisterEventListenerInstancer(&event_listener_instancer);
+ 
+         Rml::Initialise();
+@@ -283,7 +292,12 @@ public:
+     }
+ 
+     void unload() {
+-        render_interface.reset();
++        if (external) {
++            external->reset();
++        }
++        else {
++            render_interface.reset();
++        }
+     }
+ 
+     void update_primary_input(bool mouse_moved, bool non_mouse_interacted) {
+@@ -527,6 +541,12 @@ bool recompui::try_deque_event(SDL_Event& out) {
      return ui_event_queue.try_dequeue(out);
  }
  
@@ -120,19 +186,22 @@ index 277a421..4d68b7d 100644
  recompui::MenuAction recompui::menu_action_mapping::menu_action_from_rml_key(const Rml::Input::KeyIdentifier& key) {
      auto it = recompui::menu_action_mapping::rml_key_to_action.find(key);
      if (it != recompui::menu_action_mapping::rml_key_to_action.end()) {
-@@ -646,7 +653,11 @@ void recompui::activate_mouse() {
+@@ -646,7 +666,13 @@ void recompui::activate_mouse() {
      ui_state->update_focus(true, false);
  }
  
+-void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer* swap_chain_framebuffer) {
 +// The thread draw_hook runs on, which holds ui_state_mutex while it handles input and runs UI tasks (message_box).
 +static thread_local bool on_ui_thread = false;
 +
- void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer* swap_chain_framebuffer) {
++// The UI's per-frame update and draw. RT64 supplies a command list and framebuffer (ext_width and ext_height are unused);
++// an external renderer supplies the drawable size instead and both pointers are null.
++static void draw_common(plume::RenderCommandList* command_list, plume::RenderFramebuffer* swap_chain_framebuffer, int ext_width, int ext_height) {
 +    on_ui_thread = true;
  
      apply_background_input_mode();
  
-@@ -662,6 +673,11 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
+@@ -662,6 +688,11 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
  
      std::lock_guard lock{ ui_state_mutex };
  
@@ -144,7 +213,7 @@ index 277a421..4d68b7d 100644
      SDL_Event cur_event{};
  
      bool mouse_moved = false;
-@@ -710,11 +726,7 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
+@@ -710,11 +741,7 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
                  }
                  last_mouse_pos[0] = cur_event.motion.x;
                  last_mouse_pos[1] = cur_event.motion.y;
@@ -157,7 +226,71 @@ index 277a421..4d68b7d 100644
              }
              // fallthrough
              case SDL_EventType::SDL_MOUSEBUTTONDOWN:
-@@ -904,8 +916,21 @@ void recompui::set_render_hooks() {
+@@ -866,13 +893,18 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
+ 
+         ui_state->update_contexts();
+ 
+-        int width = swap_chain_framebuffer->getWidth();
+-        int height = swap_chain_framebuffer->getHeight();
++        int width = swap_chain_framebuffer != nullptr ? swap_chain_framebuffer->getWidth() : ext_width;
++        int height = swap_chain_framebuffer != nullptr ? swap_chain_framebuffer->getHeight() : ext_height;
+ 
+         // Scale the UI based on the window size with 1080 vertical resolution as the reference point.
+         ui_state->context->SetDensityIndependentPixelRatio((height) / 1080.0f);
+ 
+-        ui_state->render_interface.start(command_list, width, height);
++        if (ui_state->external) {
++            ui_state->external->begin(width, height);
++        }
++        else {
++            ui_state->render_interface.start(command_list, width, height);
++        }
+ 
+         static int prev_width = 0;
+         static int prev_height = 0;
+@@ -885,10 +917,19 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
+ 
+         ui_state->context->Update();
+         ui_state->context->Render();
+-        ui_state->render_interface.end(command_list, swap_chain_framebuffer);
++        if (ui_state->external) {
++            ui_state->external->end();
++        }
++        else {
++            ui_state->render_interface.end(command_list, swap_chain_framebuffer);
++        }
+     }
+ }
+ 
++void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer* swap_chain_framebuffer) {
++    draw_common(command_list, swap_chain_framebuffer, 0, 0);
++}
++
+ void deinit_hook() {
+     recompui::destroy_all_contexts();
+ 
+@@ -899,13 +940,42 @@ void deinit_hook() {
+     ui_state.reset();
+ }
+ 
++void recompui::init_external_renderer(const ExternalRenderer& renderer) {
++#if defined(__linux__)
++    std::locale::global(std::locale::classic());
++#endif
++    ui_state = std::make_unique<UIState>(window, nullptr, nullptr, &renderer);
++    ui_state->create_menus();
++}
++
++void recompui::draw_external(int width, int height) {
++    draw_common(nullptr, nullptr, width, height);
++}
++
++void recompui::deinit_external_renderer() {
++    deinit_hook();
++}
++
+ void recompui::set_render_hooks() {
+     RT64::SetRenderHooks(init_hook, draw_hook, deinit_hook);
  }
  
  void recompui::message_box(const char* msg) {
@@ -180,6 +313,25 @@ index 277a421..4d68b7d 100644
  }
  
  void recompui::show_context(ContextId context, std::string_view param) {
+@@ -1003,10 +1073,18 @@ Rml::ElementDocument* recompui::create_empty_document() {
+ }
+ 
+ void recompui::queue_image_from_bytes_file(const std::string &src, const std::vector<char> &bytes) {
++    if (ui_state->external) {
++        ui_state->external->queue_image_from_bytes_file(src, bytes);
++        return;
++    }
+     ui_state->render_interface.queue_image_from_bytes_file(src, bytes);
+ }
+ 
+ void recompui::queue_image_from_bytes_rgba32(const std::string &src, const std::vector<char> &bytes, uint32_t width, uint32_t height) {
++    if (ui_state->external) {
++        ui_state->external->queue_image_from_bytes_rgba32(src, bytes, width, height);
++        return;
++    }
+     ui_state->render_interface.queue_image_from_bytes_rgba32(src, bytes, width, height);
+ }
+ 
 diff --git a/recompui/src/composites/ui_mod_details_panel.cpp b/recompui/src/composites/ui_mod_details_panel.cpp
 index 88291e2..38daf7e 100644
 --- a/recompui/src/composites/ui_mod_details_panel.cpp

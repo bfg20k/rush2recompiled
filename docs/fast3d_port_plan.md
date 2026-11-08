@@ -8,9 +8,9 @@ core) is done and tested offline; nothing in the game uses it yet, and RT64 is s
 | Phase | What | State |
 | --- | --- | --- |
 | 1 | `lib/fast3d`: RDRAM-aware F3DEX2 interpreter, tested against a null backend | Done, `tests/fast3d/test_core.cpp` passes |
-| 2 | OpenGL 3.3 core rendering backend (`lib/fast3d/gfx_opengl.c`) | Done and tested against a fake GL and a real GLSL compiler; never run on a real GPU |
+| 2 | OpenGL rendering backend (`lib/fast3d/gfx_opengl.c`): 3.3 core, plus an OpenGL 2.1 / GLSL 120 flavor | Done and tested against a fake GL and a real GLSL compiler; never run on a real GPU |
 | 3 | `Fast3DContext : ultramodern::renderer::RendererContext` (`src/fast3d_context.{h,cpp}`), GL context, present, selected with `RUSH2_RENDERER=fast3d` | Written, syntax-checked against stub SDL headers only; never built with real SDL or run |
-| 4 | UI: replace the RT64-based RmlUi renderer | Not started |
+| 4 | UI: an OpenGL RmlUi renderer (`src/ui_gl_renderer.cpp`) and external-renderer hooks in RecompFrontend | Written, syntax-checked against RmlUi 6.0 headers; never linked or run |
 | 5 | Remove or guard every Rush 2 feature that reaches into RT64 internals; CMake switch | Not started |
 
 Nothing from phases 3-5 can be built or run without the game's generated sources (which need the ROM), a GPU and a
@@ -109,12 +109,46 @@ returns a `Fast3DContext`. The context makes a GL 3.3 core context on the render
 `SDL_GL_GetProcAddress`, and per frame: first `send_dl` (or `send_dummy_workload`) clears and begins the frame,
 each task runs `gfx_run_task(data_ptr & 0x3FFFFFF)`, `update_screen` ends the frame and swaps. Not done yet: the 4:3
 image is stretched to the window (no letterbox or aspect options), config options other than fullscreen are ignored,
-the selection is an environment variable rather than a UI toggle (CLAUDE.md wants one; phase 5), and the RmlUi menus
-still draw through RT64 so they will not show (phase 4).
+the selection is an environment variable rather than a UI toggle (CLAUDE.md wants one; phase 5), and the menus are drawn by the phase 4 renderer below.
+
+## OpenGL 2.1
+
+`gfx_opengl_set_glsl_flavor(GFX_GLSL_120)` (before `gfx_opengl_load_functions`) makes the backend emit GLSL 1.20
+(`attribute`/`varying`, `texture2D`, `gl_FragColor`, no `layout`) and bind attribute locations with
+`glBindAttribLocation` before linking. The vertex array object is optional in that flavor: used when the driver has
+one, otherwise the attribute pointers are set per shader (they are global state in a 2.1 context). `Fast3DContext`
+asks for a 3.3 core context first and falls back to 2.1; `RUSH2_GL=21` forces the fallback for testing. The 120 shaders
+are compiled in WebGL 1 (GLSL ES 1.00, a little stricter than 1.20) by `validate_glsl.js ... webgl1`:
+`fast3d_dump_glsl 4000 120 > tmp/shaders120.jsonl`. A real 2.1 driver may still differ.
+
+## Phase 4: the UI
+
+RecompFrontend runs its whole UI (launcher, menus, input events) from RT64's render hooks, so with another renderer
+nothing would ever start the launcher. `lib/patches/RecompFrontend.patch` now adds `recompui::ExternalRenderer`,
+`init_external_renderer()`, `draw_external(width, height)` and `deinit_external_renderer()`: the same UI code path with
+a caller-supplied RmlUi render interface instead of the plume one. The patch was made in a scratch copy of the pinned
+RecompFrontend commit and applies cleanly to it; `python tools/lib_patch.py save` should reproduce it.
+
+`src/ui_gl_renderer.cpp` is that render interface: a legacy (`RenderInterfaceCompatibility`) interface like the RT64
+one, so RmlUi hands it unpremultiplied colors and textures and it blends with `SRC_ALPHA`/`ONE_MINUS_SRC_ALPHA` (alpha:
+`ONE`/`ONE_MINUS_SRC_ALPHA`) as the RT64 one does. Vertices are transformed on the CPU (no matrix layout assumptions),
+the scissor is flipped to GL's origin, and images the game names (`?/rush2/launcher_logo`, thumbnails) are queued from
+any thread and decoded with `lib/stb/stb_image.h` (v2.30, public domain / MIT; PNG, JPEG, TGA, BMP) on first use. Two
+built-in pixels (handle 0 white, 1 transparent) match the RT64 renderer.
+
+`Fast3DContext::update_screen()` ends the game frame, draws the UI over it, then calls `gfx_opengl_restore_state()` and
+`gfx_reapply_state()`. The UI shares the GL context, and the core caches depth, blend, viewport, shader and texture
+state, so both rebuild what they believe is set (covered by `test_opengl`).
+
+Limits: the UI only draws on frames the game presented (30 fps in game; before the game starts the runtime's dummy
+workload gives one per VI), so UI input is handled at that rate; the Graphics tab still shows RT64 options that do
+nothing; RT64 is still compiled and linked, it is just never started. Texture packs, font packs and other Rush 2 code
+that call into RT64 (`texture_upscale.cpp`, `fonts.cpp`, `rush2049_dc_pack.cpp`) are phase 5 and may misbehave or crash
+under Fast3D.
 
 ## Things that make this bigger than the renderer
 
-- **The UI draws through RT64.** `recompui/src/renderer/ui_renderer.cpp` (727 lines) is an RmlUi render interface built on
+- **The UI drew through RT64 (phase 4 adds an OpenGL path, below).** `recompui/src/renderer/ui_renderer.cpp` (727 lines) is an RmlUi render interface built on
   RT64's plume RHI and hooked in through `rt64_render_hooks.h`. Without RT64 it needs a new RmlUi renderer (RmlUi ships
   a GL3 one) and the hook replaced. The graphics tab (`ui_config_tab_graphics.cpp`) and `recompui/renderer.h` use RT64
   types (`RT64::UserConfiguration`, MSAA, high-precision framebuffer) and need a Fast3D-side equivalent.

@@ -158,6 +158,9 @@ if (RUSH2_FAST3D)
     # RUSH2_RENDERER=fast3d at run time selects it (src/fast3d_context.cpp); RT64 is still the default.
     target_compile_definitions(Rush2Recompiled PRIVATE RUSH2_FAST3D)
     target_link_libraries(Rush2Recompiled PRIVATE fast3d_core)
+    # The OpenGL RmlUi renderer (docs/fast3d_port_plan.md, phase 4) and the image decoder it uses.
+    target_sources(Rush2Recompiled PRIVATE ${CMAKE_SOURCE_DIR}/src/ui_gl_renderer.cpp)
+    target_include_directories(Rush2Recompiled PRIVATE ${CMAKE_SOURCE_DIR}/lib/stb)
 endif()
 
 target_sources(Rush2Recompiled PRIVATE

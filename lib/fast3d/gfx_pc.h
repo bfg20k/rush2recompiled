@@ -27,6 +27,9 @@ void gfx_begin_frame(void);
 // Interprets the F3DEX2 display list at dl_addr (an OSTask data_ptr), then flushes buffered triangles.
 void gfx_run_task(uint32_t dl_addr);
 void gfx_end_frame(void);
+// For after another renderer (the UI) used the GL context: re-applies the state the core believes is set. Call
+// gfx_opengl_restore_state() first.
+void gfx_reapply_state(void);
 
 #ifdef __cplusplus
 }

@@ -1707,6 +1707,23 @@ void gfx_run_task(uint32_t dl_addr) {
     gfx_flush();
 }
 
+// Re-applies every piece of GL state the core caches in rendering_state. Something else drew with the same GL context
+// since the last display list (the UI overlay), so the cached values no longer say what the context holds. Call it
+// after gfx_opengl_restore_state(), before the next display list.
+void gfx_reapply_state(void) {
+    gfx_rapi->set_depth_test(rendering_state.depth_test);
+    gfx_rapi->set_depth_mask(rendering_state.depth_mask);
+    gfx_rapi->set_zmode_decal(rendering_state.decal_mode);
+    gfx_rapi->set_use_alpha(rendering_state.alpha_blend);
+    gfx_rapi->set_viewport(rendering_state.viewport.x, rendering_state.viewport.y, rendering_state.viewport.width, rendering_state.viewport.height);
+    gfx_rapi->set_scissor(rendering_state.scissor.x, rendering_state.scissor.y, rendering_state.scissor.width, rendering_state.scissor.height);
+    if (rendering_state.shader_program != NULL) {
+        gfx_rapi->load_shader(rendering_state.shader_program); // program, attribute pointers, uniforms
+    }
+    rdp.textures_changed[0] = true; // textures are selected again at the next draw
+    rdp.textures_changed[1] = true;
+}
+
 void gfx_end_frame(void) {
     gfx_rapi->end_frame();
     gfx_rapi->finish_render();

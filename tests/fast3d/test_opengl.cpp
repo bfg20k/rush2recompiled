@@ -59,6 +59,8 @@ static void f_bindBuffer(unsigned, unsigned) {}
 static void f_bufferData(unsigned, ptrdiff_t size, const void *, unsigned) { g_buffer_bytes = (size_t)size; }
 static void f_genVAO(int n, unsigned *b) { for (int i = 0; i < n; i++) b[i] = g_next_id++; log_call("glGenVertexArrays"); }
 static void f_bindVAO(unsigned) { log_call("glBindVertexArray"); }
+static std::vector<std::pair<unsigned, std::string>> g_bound_attribs;
+static void f_bindAttrib(unsigned, unsigned index, const char *name) { g_bound_attribs.push_back({index, name}); }
 static void f_enableAttrib(unsigned i) { g_enabled.push_back(i); }
 static void f_disableAttrib(unsigned i) { g_disabled.push_back(i); }
 static void f_attribPointer(unsigned i, int size, unsigned, unsigned char, int stride, const void *p) {
@@ -109,7 +111,7 @@ static void f_clear(unsigned) {}
 
 static std::map<std::string, void *> g_gl = {
     {"glGenBuffers", (void *)f_genBuffers}, {"glBindBuffer", (void *)f_bindBuffer}, {"glBufferData", (void *)f_bufferData},
-    {"glGenVertexArrays", (void *)f_genVAO}, {"glBindVertexArray", (void *)f_bindVAO},
+    {"glGenVertexArrays", (void *)f_genVAO}, {"glBindVertexArray", (void *)f_bindVAO}, {"glBindAttribLocation", (void *)f_bindAttrib},
     {"glEnableVertexAttribArray", (void *)f_enableAttrib}, {"glDisableVertexAttribArray", (void *)f_disableAttrib},
     {"glVertexAttribPointer", (void *)f_attribPointer}, {"glCreateShader", (void *)f_createShader},
     {"glShaderSource", (void *)f_shaderSource}, {"glCompileShader", (void *)f_compileShader},
@@ -234,6 +236,60 @@ static void test_shader_create_lookup_and_attribs() {
     CHECK(g_draw_counts.size() == 1 && g_draw_counts[0] == 6, "drawArrays count");
 }
 
+static bool has(const char *hay, const char *needle) { return std::strstr(hay, needle) != nullptr; }
+
+// OpenGL 2.1: GLSL 120, attribute locations bound before linking, VAO optional.
+static void test_legacy_gl21_flavor() {
+    GfxGLSL g;
+    const uint32_t id = ID_TEX_SHADE_FOG | (1u << 26); // texture edge variant, so no other test created it
+    CHECK(gfx_opengl_build_glsl(id, GFX_GLSL_120, &g), "build 120");
+    CHECK(has(g.vs, "#version 120") && has(g.fs, "#version 120"), "120 header");
+    CHECK(!has(g.vs, "layout") && !has(g.fs, "layout"), "no layout qualifiers in GLSL 120");
+    CHECK(has(g.vs, "attribute vec4 aVtxPos;") && has(g.vs, "varying vec2 vTexCoord;"), "attribute/varying in the vertex shader");
+    CHECK(has(g.fs, "varying vec2 vTexCoord;") && !has(g.fs, "\nin ") && !has(g.fs, "\nout "), "varying in the fragment shader");
+    CHECK(has(g.fs, "texture2D(uTex0") && !has(g.fs, " texture(uTex0"), "texture2D");
+    CHECK(has(g.fs, "gl_FragColor") && !has(g.fs, "fragColor"), "gl_FragColor");
+    CHECK(!has(g.fs, "precision"), "no precision qualifiers");
+    CHECK(std::strcmp(g.attrib_names[0], "aVtxPos") == 0 && std::strcmp(g.attrib_names[1], "aTexCoord") == 0 &&
+          std::strcmp(g.attrib_names[2], "aFog") == 0, "attribute names");
+    GfxGLSL g330;
+    gfx_opengl_build_glsl(id, GFX_GLSL_330_CORE, &g330);
+    CHECK(g.num_attribs == g330.num_attribs && g.num_floats == g330.num_floats, "same vertex layout in every flavor");
+
+    // A driver without a VAO: refused for 330 (core needs one), accepted for 120.
+    reset_gl();
+    auto gen = g_gl["glGenVertexArrays"], bind = g_gl["glBindVertexArray"];
+    g_gl.erase("glGenVertexArrays");
+    g_gl.erase("glBindVertexArray");
+    std::fprintf(stderr, "(expected message follows)\n");
+    gfx_opengl_set_glsl_flavor(GFX_GLSL_330_CORE);
+    CHECK(!gfx_opengl_load_functions(get_proc), "330 needs a VAO");
+    gfx_opengl_set_glsl_flavor(GFX_GLSL_120);
+    CHECK(gfx_opengl_load_functions(get_proc), "120 works without a VAO");
+    g_bound_attribs.clear();
+    GfxRenderingAPI *api = &gfx_opengl_api;
+    api->init();
+    for (auto &c : g_calls) CHECK(c.find("VertexArray") == std::string::npos, "no VAO call without a VAO: %s", c.c_str());
+    ShaderProgram *prg = api->create_and_load_new_shader(id);
+    CHECK(prg != nullptr && g_used_program != 0, "program built");
+    CHECK((int)g_bound_attribs.size() == g.num_attribs, "one bind per attribute, got %zu", g_bound_attribs.size());
+    for (size_t i = 0; i < g_bound_attribs.size(); i++) {
+        CHECK(g_bound_attribs[i].first == i && g_bound_attribs[i].second == g.attrib_names[i], "attrib %zu bound as %s", i, g_bound_attribs[i].second.c_str());
+    }
+    CHECK((int)g_attrib_ptrs.size() == g.num_attribs, "pointers set per shader without a VAO");
+
+    // With a VAO available the 120 flavor still uses it.
+    g_gl["glGenVertexArrays"] = gen;
+    g_gl["glBindVertexArray"] = bind;
+    CHECK(gfx_opengl_load_functions(get_proc), "120 with a VAO");
+    reset_gl();
+    api->init();
+    bool used_vao = false;
+    for (auto &c : g_calls) used_vao |= c.find("glGenVertexArrays") != std::string::npos;
+    CHECK(used_vao, "120 uses the VAO when the driver has one");
+    gfx_opengl_set_glsl_flavor(GFX_GLSL_330_CORE);
+}
+
 static void test_failed_shader_is_skipped_not_fatal() {
     reset_gl();
     g_fail_compile = true;
@@ -327,6 +383,24 @@ static void test_core_with_real_backend() {
     for (int c : g_draw_counts) CHECK(c == 3, "one triangle per draw, got %d vertices", c);
     CHECK(g_teximage_count == 1 && g_teximage_w == 4 && g_teximage_h == 4, "texture upload %d (%dx%d)", g_teximage_count, g_teximage_w, g_teximage_h);
     CHECK(g_last_fs.find("texture(uTex0") != std::string::npos, "textured shader samples uTex0");
+
+    // After the UI drew with the same context: restore + reapply must rebuild the program, attribute layout and VAO, and
+    // the next display list must still draw.
+    g_calls.clear();
+    g_attrib_ptrs.clear();
+    g_used_program = 0;
+    gfx_opengl_restore_state();
+    gfx_reapply_state();
+    bool rebound_vao = false;
+    for (auto &c : g_calls) rebound_vao |= c == "glBindVertexArray";
+    CHECK(rebound_vao, "restore_state rebinds the vertex array");
+    CHECK(g_used_program != 0, "reapply_state selects the current program again");
+    CHECK(!g_attrib_ptrs.empty(), "reapply_state sets the attribute pointers again");
+    g_draw_counts.clear();
+    gfx_begin_frame();
+    gfx_run_task(DL);
+    gfx_end_frame();
+    CHECK(g_draw_counts.size() == 2, "draws after reapply: %zu", g_draw_counts.size());
     std::free(rdram);
 }
 
@@ -335,6 +409,7 @@ int main() {
     test_glsl_layout_matches_core_vertex_format();
     test_shader_create_lookup_and_attribs();
     test_failed_shader_is_skipped_not_fatal();
+    test_legacy_gl21_flavor();
     test_textures_and_sampler_state();
     test_core_with_real_backend();
     test_shader_table_overflow(); // last: it fills the global shader table

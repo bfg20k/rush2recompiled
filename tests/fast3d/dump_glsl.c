@@ -1,5 +1,5 @@
 // Dumps generated GLSL for a spread of combiner ids as JSON lines, for compiling in a real GLSL compiler (see
-// tests/fast3d/validate_glsl.js). Usage: dump_glsl <count> <330|300> > shaders.jsonl
+// tests/fast3d/validate_glsl.js). Usage: dump_glsl <count> <330|300|120> > shaders.jsonl
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -22,7 +22,8 @@ static void json_str(const char *s) {
 
 int main(int argc, char **argv) {
     int count = argc > 1 ? atoi(argv[1]) : 2000;
-    enum GfxGLSLFlavor flavor = (argc > 2 && atoi(argv[2]) == 330) ? GFX_GLSL_330_CORE : GFX_GLSL_300_ES;
+    int ver = argc > 2 ? atoi(argv[2]) : 300;
+    enum GfxGLSLFlavor flavor = ver == 330 ? GFX_GLSL_330_CORE : ver == 120 ? GFX_GLSL_120 : GFX_GLSL_300_ES;
     static struct GfxGLSL glsl;
     uint32_t state = 12345;
     int failed = 0;
