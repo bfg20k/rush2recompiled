@@ -9,7 +9,7 @@ core) is done and tested offline; nothing in the game uses it yet, and RT64 is s
 | --- | --- | --- |
 | 1 | `lib/fast3d`: RDRAM-aware F3DEX2 interpreter, tested against a null backend | Done, `tests/fast3d/test_core.cpp` passes |
 | 2 | OpenGL 3.3 core rendering backend (`lib/fast3d/gfx_opengl.c`) | Done and tested against a fake GL and a real GLSL compiler; never run on a real GPU |
-| 3 | `Fast3DContext : ultramodern::renderer::RendererContext`, window and GL context, VI/present, config mapping | Not started |
+| 3 | `Fast3DContext : ultramodern::renderer::RendererContext` (`src/fast3d_context.{h,cpp}`), GL context, present, selected with `RUSH2_RENDERER=fast3d` | Written, syntax-checked against stub SDL headers only; never built with real SDL or run |
 | 4 | UI: replace the RT64-based RmlUi renderer | Not started |
 | 5 | Remove or guard every Rush 2 feature that reaches into RT64 internals; CMake switch | Not started |
 
@@ -100,6 +100,17 @@ the diff against upstream is the record):
 A `Fast3DContext` implements the same interface: `send_dl` calls `gfx_run_task(task->t.data_ptr & 0x3FFFFFF)` (after
 `gfx_begin_frame` on the first task of a frame), `update_screen` ends the frame and presents. `send_dummy_workload` must
 clear the frame the way RT64's fill-rect does. The game also needs `get_vi_regs()` data for the presented size.
+
+## Phase 3: the runtime context
+
+Build with `-DRUSH2_FAST3D=ON` and launch with `RUSH2_RENDERER=fast3d`; without the variable RT64 runs as before.
+`create_window` adds `SDL_WINDOW_OPENGL` instead of the Vulkan flag, and `renderer_callbacks.create_render_context`
+returns a `Fast3DContext`. The context makes a GL 3.3 core context on the render thread, loads GL through
+`SDL_GL_GetProcAddress`, and per frame: first `send_dl` (or `send_dummy_workload`) clears and begins the frame,
+each task runs `gfx_run_task(data_ptr & 0x3FFFFFF)`, `update_screen` ends the frame and swaps. Not done yet: the 4:3
+image is stretched to the window (no letterbox or aspect options), config options other than fullscreen are ignored,
+the selection is an environment variable rather than a UI toggle (CLAUDE.md wants one; phase 5), and the RmlUi menus
+still draw through RT64 so they will not show (phase 4).
 
 ## Things that make this bigger than the renderer
 

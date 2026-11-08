@@ -68,6 +68,7 @@
 #include "steam_input_filter.h"
 #include "linux_window.h"
 #include "sim_run.h"
+#include "fast3d_context.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -154,9 +155,14 @@ ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::
         }
     }
 
+    if (rush2::fast3d::requested()) {
+        // The Fast3D renderer draws with OpenGL (docs/fast3d_port_plan.md).
+        flags |= SDL_WINDOW_OPENGL;
+    }
 #if defined(__APPLE__)
-    flags |= SDL_WINDOW_METAL;
+    else flags |= SDL_WINDOW_METAL;
 #elif defined(RT64_SDL_WINDOW_VULKAN)
+    else
     flags |= SDL_WINDOW_VULKAN;
 #endif
 
@@ -927,6 +933,11 @@ int main(int argc, char** argv) {
     ultramodern::renderer::callbacks_t renderer_callbacks{
         .create_render_context = [](uint8_t* rdram, ultramodern::renderer::WindowHandle window_handle, bool developer_mode) {
             rush2::census::set_rdram(rdram);
+            if (rush2::fast3d::requested()) {
+                if (auto context = rush2::fast3d::create_context(rdram, window)) {
+                    return context;
+                }
+            }
             // RT64 keeps every specialized shader it compiles here and builds them all at launch (docs/hitch_profiler.md).
             RT64::RasterShaderCache::setDiskCacheDirectory(recomp::get_config_path() / "shader_cache");
             // A display list that runs into memory that isn't one is ended there, and its report (dl_fault.txt and an

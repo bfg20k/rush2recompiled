@@ -154,8 +154,15 @@ if (EXISTS ${RUSH2_GIT_SOURCE}/.git/logs/HEAD)
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${RUSH2_GIT_SOURCE}/.git/logs/HEAD)
 endif()
 
+if (RUSH2_FAST3D)
+    # RUSH2_RENDERER=fast3d at run time selects it (src/fast3d_context.cpp); RT64 is still the default.
+    target_compile_definitions(Rush2Recompiled PRIVATE RUSH2_FAST3D)
+    target_link_libraries(Rush2Recompiled PRIVATE fast3d_core)
+endif()
+
 target_sources(Rush2Recompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/main.cpp
+    ${CMAKE_SOURCE_DIR}/src/fast3d_context.cpp
     ${CMAKE_SOURCE_DIR}/src/config.cpp
     ${CMAKE_SOURCE_DIR}/src/data_location.cpp
     ${CMAKE_SOURCE_DIR}/src/data_files.cpp
