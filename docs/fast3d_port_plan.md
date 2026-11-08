@@ -8,24 +8,60 @@ core) is done and tested offline; nothing in the game uses it yet, and RT64 is s
 | Phase | What | State |
 | --- | --- | --- |
 | 1 | `lib/fast3d`: RDRAM-aware F3DEX2 interpreter, tested against a null backend | Done, `tests/fast3d/test_core.cpp` passes |
-| 2 | OpenGL rendering backend (`GfxRenderingAPI`) | Not started |
+| 2 | OpenGL 3.3 core rendering backend (`lib/fast3d/gfx_opengl.c`) | Done and tested against a fake GL and a real GLSL compiler; never run on a real GPU |
 | 3 | `Fast3DContext : ultramodern::renderer::RendererContext`, window and GL context, VI/present, config mapping | Not started |
 | 4 | UI: replace the RT64-based RmlUi renderer | Not started |
 | 5 | Remove or guard every Rush 2 feature that reaches into RT64 internals; CMake switch | Not started |
 
-Nothing from phases 2-5 can be built or run without the game's generated sources (which need the ROM), a GPU and a
+Nothing from phases 3-5 can be built or run without the game's generated sources (which need the ROM), a GPU and a
 window, so each phase needs an in-game check by someone with those.
 
-## Running the Phase 1 test
+## Running the tests
 
 ```
 cmake -S lib/fast3d -B tmp/fast3d && cmake --build tmp/fast3d && ctest --test-dir tmp/fast3d --output-on-failure
 ```
 
-or configure the main project with `-DRUSH2_FAST3D=ON`. The test builds a fake RDRAM, hand-encodes F3DEX2 display lists
+or configure the main project with `-DRUSH2_FAST3D=ON`. `fast3d_core` builds a fake RDRAM, hand-encodes F3DEX2 display lists
 and checks the triangles and texture uploads a null backend receives. It covers vertex, matrix and light decoding,
 segment addressing, nested display lists, G_TRI2 and G_QUAD, 16-bit texture decoding from an unaligned address, the
 content-keyed texture cache, and malformed lists (self-branching, runaway recursion, corrupt vertex counts).
+
+`fast3d_opengl` runs the OpenGL backend against a fake GL that records calls (`tests/fast3d/test_opengl.cpp`) and also
+drives the real core and backend together. It covers the function loader, that the vertex attribute layout matches the
+vertex the core writes, shader caching, a shader that fails to compile (logged and skipped, not fatal), table overflow,
+texture upload and wrap/filter mapping.
+
+The generated GLSL is checked by a real compiler, outside ctest because it needs node and playwright:
+
+```
+cmake --build tmp/fast3d --target fast3d_dump_glsl
+./tmp/fast3d/fast3d_dump_glsl 4000 300 > tmp/shaders.jsonl
+NODE_PATH=$(npm root -g) node tests/fast3d/validate_glsl.js tmp/shaders.jsonl
+```
+
+This compiles and links 4000 combiner shaders (every option bit combination plus a pseudo-random spread of mux values) in
+WebGL2 on Chromium's SwiftShader. It uses the `#version 300 es` flavor, which differs from the shipping `#version 330 core`
+only in the version line and precision qualifiers, so it checks the shader bodies and attribute layout but not the 330
+dialect itself. A real GPU driver may still reject something a software compiler accepts.
+
+## The OpenGL backend
+
+`lib/fast3d/gfx_opengl.{c,h}` adapts upstream's OpenGL backend:
+
+- **GL 3.3 core profile**, GLSL 330 with fixed attribute locations (position, texcoord, fog, combiner inputs) and one VAO.
+  Upstream used GLSL 110, which a core context rejects.
+- **No link-time GL.** The window layer creates the context and passes a proc-address function to
+  `gfx_opengl_load_functions()` (for example `SDL_GL_GetProcAddress`). On Windows it must also resolve the GL 1.1 entry
+  points, which `SDL_GL_GetProcAddress` does and a bare `wglGetProcAddress` does not.
+- **No `abort()`.** A shader that fails to compile or link is logged to stderr once and skipped at draw time.
+- Shader programs sit in a hash table (3072 programs) instead of upstream's 64-entry pool, which overflowed silently.
+  Past the limit a combiner is logged and not drawn.
+- Bounds-checked source building, and a default return in the combiner lookup (upstream fell off the end of it).
+
+What the backend leaves to phase 3: it draws into whatever framebuffer is bound, clears color and depth at
+`gfx_begin_frame()`, and does not create the window, swap buffers, handle the default framebuffer's size, or letterbox
+the 4:3 image. The viewport and scissor are in window pixels, as the core computes them from `gfx_set_dimensions()`.
 
 ## RDRAM layout (why the core is not just upstream Fast3D)
 

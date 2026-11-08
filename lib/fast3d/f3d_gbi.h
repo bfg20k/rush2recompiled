@@ -98,6 +98,10 @@ typedef struct Gfx {
 #define G_IM_SIZ_16b 2
 #define G_IM_SIZ_32b 3
 
+// Texture wrap flags (cms/cmt in G_SETTILE).
+#define G_TX_MIRROR 0x1
+#define G_TX_CLAMP 0x2
+
 #define G_TX_LOADTILE 7
 #define G_TX_RENDERTILE 0
 #define G_TEXTURE_IMAGE_FRAC 2
