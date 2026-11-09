@@ -343,10 +343,13 @@ target_include_directories(Rush2Recompiled PRIVATE
 
 # The x86-64 baseline the game's own code is compiled for. nehalem (SSE4.2, POPCNT) is the default; a CPU older than that
 # (Core 2, early Phenom) dies with SIGILL at the first instruction the compiler picked from the newer set. Configure with
-# -DRUSH2_MARCH=core2 or -DRUSH2_MARCH=x86-64 for those.
+# -DRUSH2_MARCH=penryn (has SSE4.1), core2 (SSSE3) or x86-64 (SSE2 only) for those.
 set(RUSH2_MARCH "nehalem" CACHE STRING "-march for Rush2Recompiled's own code on x86-64")
 if (CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
     target_compile_options(Rush2Recompiled PRIVATE -march=${RUSH2_MARCH} -fno-strict-aliasing -fms-extensions)
+    # librecomp's RSP code uses _mm_blendv_epi8 (SSE4.1). This header swaps in an SSE2 version when the target has no
+    # SSE4.1 (-DRUSH2_MARCH=core2 or x86-64) and does nothing otherwise.
+    set_source_files_properties(${CMAKE_SOURCE_DIR}/rsp/aspMain.cpp PROPERTIES COMPILE_OPTIONS "-include;${CMAKE_SOURCE_DIR}/src/sse41_compat.h")
 else()
     target_compile_options(Rush2Recompiled PRIVATE -fno-strict-aliasing -fms-extensions)
 endif()
