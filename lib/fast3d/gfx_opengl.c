@@ -188,78 +188,42 @@ static void sb_printf(struct StrBuf *sb, const char *fmt, ...) {
     sb_append(sb, tmp);
 }
 
-static const char *shader_item_to_str(uint32_t item, bool with_alpha, bool only_alpha, bool inputs_have_alpha, bool hint_single_element) {
-    if (!only_alpha) {
-        switch (item) {
-            case SHADER_0:
-                return with_alpha ? "vec4(0.0, 0.0, 0.0, 0.0)" : "vec3(0.0, 0.0, 0.0)";
-            case SHADER_INPUT_1:
-                return with_alpha || !inputs_have_alpha ? "vInput1" : "vInput1.rgb";
-            case SHADER_INPUT_2:
-                return with_alpha || !inputs_have_alpha ? "vInput2" : "vInput2.rgb";
-            case SHADER_INPUT_3:
-                return with_alpha || !inputs_have_alpha ? "vInput3" : "vInput3.rgb";
-            case SHADER_INPUT_4:
-                return with_alpha || !inputs_have_alpha ? "vInput4" : "vInput4.rgb";
-            case SHADER_TEXEL0:
-                return with_alpha ? "texVal0" : "texVal0.rgb";
-            case SHADER_TEXEL0A:
-                return hint_single_element ? "texVal0.a" :
-                    (with_alpha ? "vec4(texVal0.a, texVal0.a, texVal0.a, texVal0.a)" : "vec3(texVal0.a, texVal0.a, texVal0.a)");
-            case SHADER_TEXEL1:
-                return with_alpha ? "texVal1" : "texVal1.rgb";
-            default:
-                return with_alpha ? "vec4(0.0, 0.0, 0.0, 0.0)" : "vec3(0.0, 0.0, 0.0)";
-        }
-    }
-    switch (item) {
-        case SHADER_INPUT_1:
-            return "vInput1.a";
-        case SHADER_INPUT_2:
-            return "vInput2.a";
-        case SHADER_INPUT_3:
-            return "vInput3.a";
-        case SHADER_INPUT_4:
-            return "vInput4.a";
-        case SHADER_TEXEL0:
-        case SHADER_TEXEL0A:
-            return "texVal0.a";
-        case SHADER_TEXEL1:
-            return "texVal1.a";
-        case SHADER_0:
-        default:
-            return "0.0";
+// GLSL expression for a combiner source: a vec3 in the color group, a float in the alpha group.
+static const char *source_expr(uint8_t s, bool alpha_group) {
+    switch (s) {
+        case CCS_ONE: return alpha_group ? "1.0" : "vec3(1.0)";
+        case CCS_COMB: return alpha_group ? "combined.a" : "combined.rgb";
+        case CCS_COMBA: return alpha_group ? "combined.a" : "vec3(combined.a)";
+        case CCS_T0: return alpha_group ? "texVal0.a" : "texVal0.rgb";
+        case CCS_T0A: return alpha_group ? "texVal0.a" : "vec3(texVal0.a)";
+        case CCS_T1: return alpha_group ? "texVal1.a" : "texVal1.rgb";
+        case CCS_T1A: return alpha_group ? "texVal1.a" : "vec3(texVal1.a)";
+        case CCS_PRIM: return alpha_group ? "vPrim.a" : "vPrim.rgb";
+        case CCS_PRIMA: return alpha_group ? "vPrim.a" : "vec3(vPrim.a)";
+        case CCS_SHADE: return alpha_group ? "vShade.a" : "vShade.rgb";
+        case CCS_SHADEA: return alpha_group ? "vShade.a" : "vec3(vShade.a)";
+        case CCS_ENV: return alpha_group ? "vEnv.a" : "vEnv.rgb";
+        case CCS_ENVA: return alpha_group ? "vEnv.a" : "vec3(vEnv.a)";
+        case CCS_LOD: return alpha_group ? "vMisc.x" : "vec3(vMisc.x)";
+        case CCS_PRIMLOD: return alpha_group ? "vMisc.y" : "vec3(vMisc.y)";
+        case CCS_ZERO:
+        default: return alpha_group ? "0.0" : "vec3(0.0)";
     }
 }
 
-static void append_formula(struct StrBuf *sb, uint8_t c[2][4], bool do_single, bool do_multiply, bool do_mix, bool with_alpha, bool only_alpha, bool opt_alpha) {
-    if (do_single) {
-        sb_append(sb, shader_item_to_str(c[only_alpha][3], with_alpha, only_alpha, opt_alpha, false));
-    } else if (do_multiply) {
-        sb_append(sb, shader_item_to_str(c[only_alpha][0], with_alpha, only_alpha, opt_alpha, false));
-        sb_append(sb, " * ");
-        sb_append(sb, shader_item_to_str(c[only_alpha][2], with_alpha, only_alpha, opt_alpha, true));
-    } else if (do_mix) {
-        sb_append(sb, "mix(");
-        sb_append(sb, shader_item_to_str(c[only_alpha][1], with_alpha, only_alpha, opt_alpha, false));
-        sb_append(sb, ", ");
-        sb_append(sb, shader_item_to_str(c[only_alpha][0], with_alpha, only_alpha, opt_alpha, false));
-        sb_append(sb, ", ");
-        sb_append(sb, shader_item_to_str(c[only_alpha][2], with_alpha, only_alpha, opt_alpha, true));
-        sb_append(sb, ")");
-    } else {
-        sb_append(sb, "(");
-        sb_append(sb, shader_item_to_str(c[only_alpha][0], with_alpha, only_alpha, opt_alpha, false));
-        sb_append(sb, " - ");
-        sb_append(sb, shader_item_to_str(c[only_alpha][1], with_alpha, only_alpha, opt_alpha, false));
-        sb_append(sb, ") * ");
-        sb_append(sb, shader_item_to_str(c[only_alpha][2], with_alpha, only_alpha, opt_alpha, true));
-        sb_append(sb, " + ");
-        sb_append(sb, shader_item_to_str(c[only_alpha][3], with_alpha, only_alpha, opt_alpha, false));
-    }
+static const char *const input_names[4] = {"Shade", "Prim", "Env", "Misc"};
+
+// One combiner cycle: combined = clamp((a - b) * c + d) for the rgb and alpha groups.
+static void append_cycle(struct StrBuf *sb, const struct CCFeatures *cc, int cy) {
+    sb_printf(sb, "combined = vec4(clamp((%s - %s) * %s + %s, 0.0, 1.0), ",
+              source_expr(cc->rgb[cy][0], false), source_expr(cc->rgb[cy][1], false),
+              source_expr(cc->rgb[cy][2], false), source_expr(cc->rgb[cy][3], false));
+    sb_printf(sb, "clamp((%s - %s) * %s + %s, 0.0, 1.0));\n",
+              source_expr(cc->alpha[cy][0], true), source_expr(cc->alpha[cy][1], true),
+              source_expr(cc->alpha[cy][2], true), source_expr(cc->alpha[cy][3], true));
 }
 
-bool gfx_opengl_build_glsl(uint32_t shader_id, enum GfxGLSLFlavor flavor, struct GfxGLSL *out) {
+bool gfx_opengl_build_glsl(uint64_t shader_id, enum GfxGLSLFlavor flavor, struct GfxGLSL *out) {
     struct CCFeatures cc;
     gfx_cc_get_features(shader_id, &cc);
 
@@ -267,10 +231,10 @@ bool gfx_opengl_build_glsl(uint32_t shader_id, enum GfxGLSLFlavor flavor, struct
     struct StrBuf vs = {out->vs, sizeof(out->vs), 0, false};
     struct StrBuf fs = {out->fs, sizeof(out->fs), 0, false};
     const bool any_texture = cc.used_textures[0] || cc.used_textures[1];
-    const int input_size = cc.opt_alpha ? 4 : 3;
+    const bool need_alpha = cc.opt_alpha || cc.opt_texture_edge;
     const bool noise = cc.opt_alpha && cc.opt_noise;
 
-    out->num_inputs = cc.num_inputs;
+    out->num_inputs = (uint8_t)cc.num_inputs;
     out->used_textures[0] = cc.used_textures[0];
     out->used_textures[1] = cc.used_textures[1];
     out->used_noise = noise;
@@ -288,7 +252,7 @@ bool gfx_opengl_build_glsl(uint32_t shader_id, enum GfxGLSLFlavor flavor, struct
     }
     for (int i = 0; i < cc.num_inputs; i++) {
         input_loc[i] = out->num_attribs;
-        out->attrib_sizes[out->num_attribs++] = (uint8_t)input_size;
+        out->attrib_sizes[out->num_attribs++] = 4;
     }
     for (int i = 0; i < out->num_attribs; i++) {
         out->num_floats += out->attrib_sizes[i];
@@ -309,7 +273,7 @@ bool gfx_opengl_build_glsl(uint32_t shader_id, enum GfxGLSLFlavor flavor, struct
         snprintf(out->attrib_names[fog_loc], sizeof(out->attrib_names[0]), "aFog");
     }
     for (int i = 0; i < cc.num_inputs; i++) {
-        snprintf(out->attrib_names[input_loc[i]], sizeof(out->attrib_names[0]), "aInput%d", i + 1);
+        snprintf(out->attrib_names[input_loc[i]], sizeof(out->attrib_names[0]), "a%s", input_names[cc.input_kind[i]]);
     }
     char loc[32];
 
@@ -329,8 +293,8 @@ bool gfx_opengl_build_glsl(uint32_t shader_id, enum GfxGLSLFlavor flavor, struct
     }
     for (int i = 0; i < cc.num_inputs; i++) {
         snprintf(loc, sizeof(loc), legacy ? "" : "layout(location = %d) ", input_loc[i]);
-        sb_printf(&vs, "%s%s vec%d aInput%d;\n", loc, vs_in, input_size, i + 1);
-        sb_printf(&vs, "%s vec%d vInput%d;\n", vs_out, input_size, i + 1);
+        sb_printf(&vs, "%s%s vec4 a%s;\n", loc, vs_in, input_names[cc.input_kind[i]]);
+        sb_printf(&vs, "%s vec4 v%s;\n", vs_out, input_names[cc.input_kind[i]]);
     }
     sb_line(&vs, "void main() {");
     if (any_texture) {
@@ -340,7 +304,7 @@ bool gfx_opengl_build_glsl(uint32_t shader_id, enum GfxGLSLFlavor flavor, struct
         sb_line(&vs, "vFog = aFog;");
     }
     for (int i = 0; i < cc.num_inputs; i++) {
-        sb_printf(&vs, "vInput%d = aInput%d;\n", i + 1, i + 1);
+        sb_printf(&vs, "v%s = a%s;\n", input_names[cc.input_kind[i]], input_names[cc.input_kind[i]]);
     }
     sb_line(&vs, "gl_Position = aVtxPos;");
     sb_line(&vs, "}");
@@ -358,7 +322,7 @@ bool gfx_opengl_build_glsl(uint32_t shader_id, enum GfxGLSLFlavor flavor, struct
         sb_printf(&fs, "%s vec4 vFog;\n", fs_in);
     }
     for (int i = 0; i < cc.num_inputs; i++) {
-        sb_printf(&fs, "%s vec%d vInput%d;\n", fs_in, input_size, i + 1);
+        sb_printf(&fs, "%s vec4 v%s;\n", fs_in, input_names[cc.input_kind[i]]);
     }
     if (!legacy) {
         sb_line(&fs, "out vec4 fragColor;");
@@ -384,31 +348,22 @@ bool gfx_opengl_build_glsl(uint32_t shader_id, enum GfxGLSLFlavor flavor, struct
     if (cc.used_textures[1]) {
         sb_printf(&fs, "vec4 texVal1 = %s(uTex1, vTexCoord);\n", tex_fn);
     }
-    sb_append(&fs, cc.opt_alpha ? "vec4 texel = " : "vec3 texel = ");
-    if (!cc.color_alpha_same && cc.opt_alpha) {
-        sb_append(&fs, "vec4(");
-        append_formula(&fs, cc.c, cc.do_single[0], cc.do_multiply[0], cc.do_mix[0], false, false, true);
-        sb_append(&fs, ", ");
-        append_formula(&fs, cc.c, cc.do_single[1], cc.do_multiply[1], cc.do_mix[1], true, true, true);
-        sb_append(&fs, ")");
-    } else {
-        append_formula(&fs, cc.c, cc.do_single[0], cc.do_multiply[0], cc.do_mix[0], cc.opt_alpha, false, cc.opt_alpha);
+    sb_line(&fs, "vec4 combined = vec4(0.0);");
+    append_cycle(&fs, &cc, 0);
+    if (cc.two_cycle) {
+        append_cycle(&fs, &cc, 1);
     }
-    sb_line(&fs, ";");
-    if (cc.opt_texture_edge && cc.opt_alpha) {
+    sb_line(&fs, "vec4 texel = combined;");
+    if (cc.opt_texture_edge && need_alpha) {
         sb_line(&fs, "if (texel.a > 0.3) texel.a = 1.0; else discard;");
     }
     if (cc.opt_fog) {
-        if (cc.opt_alpha) {
-            sb_line(&fs, "texel = vec4(mix(texel.rgb, vFog.rgb, vFog.a), texel.a);");
-        } else {
-            sb_line(&fs, "texel = mix(texel, vFog.rgb, vFog.a);");
-        }
+        sb_line(&fs, "texel.rgb = mix(texel.rgb, vFog.rgb, vFog.a);");
     }
     if (noise) {
         sb_line(&fs, "texel.a *= floor(clamp(random(vec3(floor(gl_FragCoord.xy * (240.0 / float(window_height))), float(frame_count))) + texel.a, 0.0, 1.0));");
     }
-    sb_printf(&fs, "%s = %s;\n", legacy ? "gl_FragColor" : "fragColor", cc.opt_alpha ? "texel" : "vec4(texel, 1.0)");
+    sb_printf(&fs, "%s = %s;\n", legacy ? "gl_FragColor" : "fragColor", cc.opt_alpha ? "texel" : "vec4(texel.rgb, 1.0)");
     sb_line(&fs, "}");
 
     return !vs.overflow && !fs.overflow;
@@ -417,7 +372,7 @@ bool gfx_opengl_build_glsl(uint32_t shader_id, enum GfxGLSLFlavor flavor, struct
 // ---- Shader programs -----------------------------------------------------------------------------------------------
 
 struct ShaderProgram {
-    uint32_t shader_id;
+    uint64_t shader_id;
     GLuint program; // 0 when compilation failed: the program is skipped at draw time
     uint8_t num_inputs;
     bool used_textures[2];
@@ -442,9 +397,9 @@ static struct ShaderProgram *current_program;
 static uint32_t frame_count;
 static uint32_t current_height = 1;
 
-static size_t shader_slot(uint32_t shader_id) {
-    uint32_t h = shader_id * 2654435761u;
-    return (size_t)(h >> 20) & (SHADER_TABLE_SIZE - 1);
+static size_t shader_slot(uint64_t shader_id) {
+    uint64_t h = shader_id * 0x9E3779B97F4A7C15ull;
+    return (size_t)(h >> 52) & (SHADER_TABLE_SIZE - 1);
 }
 
 static bool gfx_opengl_z_is_from_0_to_1(void) {
@@ -482,7 +437,7 @@ static void gfx_opengl_load_shader(struct ShaderProgram *new_prg) {
     gfx_opengl_set_uniforms(new_prg);
 }
 
-static GLuint compile_shader(GLenum type, const char *source, const char *what, uint32_t shader_id) {
+static GLuint compile_shader(GLenum type, const char *source, const char *what, uint64_t shader_id) {
     GLuint shader = glCreateShader(type);
     const GLchar *sources[1] = {source};
     glShaderSource(shader, 1, sources, NULL);
@@ -492,14 +447,14 @@ static GLuint compile_shader(GLenum type, const char *source, const char *what, 
     if (!ok) {
         char log[1024] = {0};
         glGetShaderInfoLog(shader, sizeof(log) - 1, NULL, log);
-        fprintf(stderr, "fast3d: %s shader for combiner 0x%08x failed to compile:\n%s\n", what, shader_id, log);
+        fprintf(stderr, "fast3d: %s shader for combiner 0x%016llx failed to compile:\n%s\n", what, (unsigned long long)shader_id, log);
         glDeleteShader(shader);
         return 0;
     }
     return shader;
 }
 
-static GLuint build_program(const struct GfxGLSL *glsl, uint32_t shader_id) {
+static GLuint build_program(const struct GfxGLSL *glsl, uint64_t shader_id) {
     GLuint vs = compile_shader(GL_VERTEX_SHADER, glsl->vs, "vertex", shader_id);
     GLuint fs = vs != 0 ? compile_shader(GL_FRAGMENT_SHADER, glsl->fs, "fragment", shader_id) : 0;
     if (vs == 0 || fs == 0) {
@@ -522,14 +477,14 @@ static GLuint build_program(const struct GfxGLSL *glsl, uint32_t shader_id) {
     if (!ok) {
         char log[1024] = {0};
         glGetProgramInfoLog(program, sizeof(log) - 1, NULL, log);
-        fprintf(stderr, "fast3d: program for combiner 0x%08x failed to link:\n%s\n", shader_id, log);
+        fprintf(stderr, "fast3d: program for combiner 0x%016llx failed to link:\n%s\n", (unsigned long long)shader_id, log);
         glDeleteProgram(program);
         return 0;
     }
     return program;
 }
 
-static struct ShaderProgram *gfx_opengl_create_and_load_new_shader(uint32_t shader_id) {
+static struct ShaderProgram *gfx_opengl_create_and_load_new_shader(uint64_t shader_id) {
     struct GfxGLSL glsl;
     bool built = gfx_opengl_build_glsl(shader_id, selected_flavor, &glsl);
 
@@ -558,7 +513,7 @@ static struct ShaderProgram *gfx_opengl_create_and_load_new_shader(uint32_t shad
         if (built) {
             prg->program = build_program(&glsl, shader_id);
         } else {
-            fprintf(stderr, "fast3d: shader source for combiner 0x%08x is too large\n", shader_id);
+            fprintf(stderr, "fast3d: shader source for combiner 0x%016llx is too large\n", (unsigned long long)shader_id);
         }
         if (prg->program != 0) {
             glUseProgram(prg->program);
@@ -580,14 +535,14 @@ static struct ShaderProgram *gfx_opengl_create_and_load_new_shader(uint32_t shad
         shader_table[slot] = prg;
         shader_count++;
     } else {
-        fprintf(stderr, "fast3d: too many shader programs, combiner 0x%08x will not draw\n", shader_id);
+        fprintf(stderr, "fast3d: too many shader programs, combiner 0x%016llx will not draw\n", (unsigned long long)shader_id);
     }
 
     gfx_opengl_load_shader(prg);
     return prg;
 }
 
-static struct ShaderProgram *gfx_opengl_lookup_shader(uint32_t shader_id) {
+static struct ShaderProgram *gfx_opengl_lookup_shader(uint64_t shader_id) {
     size_t slot = shader_slot(shader_id);
     while (shader_table[slot] != NULL) {
         if (shader_table[slot]->shader_id == shader_id) {

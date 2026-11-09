@@ -194,3 +194,20 @@ First screenshots showed black/speckled ground, white cars, magenta noise on bil
 - G_SETTIMG width is 12 bits (was 10). `tile_dims` applies the mask after the no-size fallback.
 - stderr lines prefixed `[fast3d]` list each distinct combiner/render mode and any unsupported texture, once each.
   Still open: only cycle 0 of the combiner is used (2-cycle modes); check the `cycle=` field in those lines.
+
+## Second round (after the first in-game screenshots with the fixes above)
+
+Nearly every 3D draw is in 2-cycle mode with G_FOG on, so the combiner was the next big gap:
+
+- **Combiner rewritten** (`gfx_cc.{h,c}`, `gfx_opengl.c`): the shader id is now 64 bits holding both cycles' raw
+  G_SETCOMBINE fields plus option bits. Every slot is resolved with the RDP's own per-slot numbering. The old
+  3-bit-per-slot scheme turned SHADE/PRIM/ENV alpha, constant 1, COMBINED and TEXEL1 alpha into 0, so translucent
+  parts (car windows) and alpha-driven HUD sprites vanished, and cycle 1 was dropped. Cycle 1's TEXEL0/TEXEL1 are the
+  next tile's texels (swapped relative to cycle 0), COMBINED in cycle 1 is cycle 0's result. Not modelled: CENTER,
+  SCALE, K4, K5, noise (read as 0), LOD (distance approximation, as before).
+- **Blend**: framebuffer blending is only enabled for the XLU blender form (CLR_IN * A_IN + CLR_MEM * (1 - A_IN), read
+  from the final blender cycle). Opaque modes no longer take combiner alpha as translucency. Alpha cutouts
+  (CVG_X_ALPHA or G_AC_THRESHOLD) discard below 0.3.
+- G_TEXRECT now samples the tile named in the command (it used the last G_TEXTURE tile).
+- TLUT type IA16 (G_SETOTHERMODE_H bits 14-15 = 3) is decoded as intensity + alpha and is part of the texture cache key.
+- Test encoders now emit real hardware values (constant 0 is 31/15/7, not 0).

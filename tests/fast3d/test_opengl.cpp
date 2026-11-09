@@ -164,9 +164,36 @@ static int g_failures;
         }                                                                                             \
     } while (0)
 
-static const uint32_t ID_SHADE = (4u << 9) | (4u << 21) | (1u << 24); // color input1, alpha input1, with alpha
-static const uint32_t ID_TEX_SHADE_FOG =
-    (5u) | (4u << 6) | (1u << 24) | (1u << 25) | (5u << 12) | (4u << 18); // texel0 * input, with alpha and fog
+// Raw RDP numbering (see gfx_cc.h): d = SHADE (4) for color and alpha; texel0 * shade is a = TEXEL0 (1), c = SHADE (4).
+static const uint64_t ID_SHADE = gfx_cc_pack_cycle(15, 15, 31, 4, 7, 7, 7, 4) | SHADER_OPT_ALPHA;
+static const uint64_t ID_TEX_SHADE_FOG =
+    gfx_cc_pack_cycle(1, 15, 4, 7, 1, 7, 4, 7) | SHADER_OPT_ALPHA | SHADER_OPT_FOG; // texel0 * shade, with alpha and fog
+
+static bool has(const char *hay, const char *needle) { return std::strstr(hay, needle) != nullptr; }
+
+// Inputs the old 3-bit combiner dropped to 0: SHADE_ALPHA / PRIM_ALPHA / ENV_ALPHA as c, constant 1, COMBINED, cycle 2.
+static void test_combiner_sources() {
+    // cycle 0: TEXEL0 * SHADE_ALPHA (c = 11) in rgb, alpha = constant 1 (d = 6); cycle 1: COMBINED (d = 0) * PRIM_ALPHA.
+    uint64_t id = gfx_cc_pack_cycle(1, 15, 11, 7, 7, 7, 7, 6) | (gfx_cc_pack_cycle(0, 15, 10, 7, 0, 7, 3, 7) << 28) |
+                  SHADER_OPT_TWO_CYCLE | SHADER_OPT_ALPHA;
+    CCFeatures f;
+    gfx_cc_get_features(id, &f);
+    CHECK(f.rgb[0][2] == CCS_SHADEA && f.alpha[0][3] == CCS_ONE, "cycle 0: c = SHADE alpha, alpha d = 1");
+    CHECK(f.rgb[1][0] == CCS_COMB && f.rgb[1][2] == CCS_PRIMA, "cycle 1: COMBINED * PRIM alpha");
+    CHECK(f.used_textures[0] && !f.used_textures[1], "texel0 in cycle 0 only");
+    CHECK(f.num_inputs == 2 && f.input_kind[0] == CCIN_SHADE && f.input_kind[1] == CCIN_PRIM, "shade and prim inputs");
+    GfxGLSL g;
+    CHECK(gfx_opengl_build_glsl(id, GFX_GLSL_120, &g), "build");
+    CHECK(has(g.fs, "vec3(vShade.a)") && has(g.fs, "combined.rgb") && has(g.fs, "vec3(vPrim.a)"), "sources appear in the shader");
+    // Cycle 1's TEXEL0 is the next tile's texel (TEXEL1 of cycle 0).
+    id = gfx_cc_pack_cycle(15, 15, 31, 7, 7, 7, 7, 7) | (gfx_cc_pack_cycle(15, 15, 31, 1, 7, 7, 7, 1) << 28) | SHADER_OPT_TWO_CYCLE;
+    gfx_cc_get_features(id, &f);
+    CHECK(f.rgb[1][3] == CCS_T1 && f.used_textures[1] && !f.used_textures[0], "cycle 1 TEXEL0 reads tile + 1");
+    // Single cycle ignores the second cycle's fields entirely.
+    id = gfx_cc_pack_cycle(15, 15, 31, 4, 7, 7, 7, 4) | (gfx_cc_pack_cycle(1, 2, 3, 3, 1, 2, 3, 3) << 28);
+    gfx_cc_get_features(id, &f);
+    CHECK(!f.used_textures[0] && !f.used_textures[1] && f.num_inputs == 1, "cycle 1 unused in one-cycle mode");
+}
 
 static void test_loader() {
     CHECK(!gfx_opengl_load_functions(nullptr), "null loader must fail");
@@ -236,12 +263,11 @@ static void test_shader_create_lookup_and_attribs() {
     CHECK(g_draw_counts.size() == 1 && g_draw_counts[0] == 6, "drawArrays count");
 }
 
-static bool has(const char *hay, const char *needle) { return std::strstr(hay, needle) != nullptr; }
 
 // OpenGL 2.1: GLSL 120, attribute locations bound before linking, VAO optional.
 static void test_legacy_gl21_flavor() {
     GfxGLSL g;
-    const uint32_t id = ID_TEX_SHADE_FOG | (1u << 26); // texture edge variant, so no other test created it
+    const uint64_t id = ID_TEX_SHADE_FOG | SHADER_OPT_TEXTURE_EDGE; // texture edge variant, so no other test created it
     CHECK(gfx_opengl_build_glsl(id, GFX_GLSL_120, &g), "build 120");
     CHECK(has(g.vs, "#version 120") && has(g.fs, "#version 120"), "120 header");
     CHECK(!has(g.vs, "layout") && !has(g.fs, "layout"), "no layout qualifiers in GLSL 120");
@@ -295,7 +321,7 @@ static void test_failed_shader_is_skipped_not_fatal() {
     g_fail_compile = true;
     GfxRenderingAPI *api = &gfx_opengl_api;
     std::fprintf(stderr, "(expected compile error messages follow)\n");
-    const uint32_t id = ID_SHADE | (1u << 27); // an id no earlier test created
+    const uint64_t id = ID_SHADE | SHADER_OPT_NOISE; // an id no earlier test created
     ShaderProgram *prg = api->create_and_load_new_shader(id);
     CHECK(prg != nullptr, "a failed shader still yields a program object for the core");
     CHECK(api->lookup_shader(id) == prg, "failure is cached, so it is not recompiled every draw");
@@ -308,7 +334,7 @@ static void test_failed_shader_is_skipped_not_fatal() {
     uint8_t n;
     bool tex[2];
     api->shader_get_info(prg, &n, tex);
-    CHECK(n == 4, "layout info is still correct (the highest input used is INPUT_4) so the core builds a valid vertex buffer, got %d", n);
+    CHECK(n == 1, "layout info is still correct (one combiner input: shade) so the core builds a valid vertex buffer, got %d", n);
     g_fail_compile = false;
 }
 
@@ -319,13 +345,13 @@ static void test_shader_table_overflow() {
     std::fprintf(stderr, "(expected 'too many shader programs' messages follow)\n");
     std::vector<ShaderProgram *> first;
     for (uint32_t i = 0; i < 3500; i++) {
-        uint32_t id = 0x00100000u + i * 7; // distinct, no options
+        uint64_t id = 0x00100000ull + i * 7; // distinct, no options
         ShaderProgram *p = api->create_and_load_new_shader(id);
         CHECK(p != nullptr, "program %u", i);
         if (i < 50) first.push_back(p);
     }
     for (uint32_t i = 0; i < 50; i++) {
-        CHECK(api->lookup_shader(0x00100000u + i * 7) == first[i], "early program %u lost", i);
+        CHECK(api->lookup_shader(0x00100000ull + i * 7) == first[i], "early program %u lost", i);
     }
 }
 
@@ -405,6 +431,7 @@ static void test_core_with_real_backend() {
 }
 
 int main() {
+    test_combiner_sources();
     test_loader();
     test_glsl_layout_matches_core_vertex_format();
     test_shader_create_lookup_and_attribs();

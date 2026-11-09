@@ -50,9 +50,17 @@ static inline void g_segment(uint32_t seg, uint32_t base) { cmd(0xDB000000u | (6
 static inline void g_dl(uint32_t addr, bool branch) { cmd(0xDE000000u | (branch ? 0x10000u : 0), addr); }
 static inline void g_enddl() { cmd(0xDF000000u, 0); }
 static inline void g_geometry_mode(uint32_t clear, uint32_t set) { cmd(0xD9000000u | (~clear & 0x00FFFFFFu), set); }
-static inline void g_combine_shade() { cmd(0xFC000000u, (4u << 15) | (4u << 9)); }
+// G_SETOTHERMODE_H (F3DEX2): sets `len` bits at `shift` of the high other-mode word.
+static inline void g_othermode_h(uint32_t shift, uint32_t len, uint32_t value) { cmd(0xE3000000u | ((32 - shift - len) << 8) | (len - 1), value); }
+// G_SETCOMBINE with both cycles set to the same (a - b) * c + d, like the gsDPSetCombineMode macros do. Constant 0 is
+// 15 (a, b), 31 (c) or 7 (d and every alpha slot) in the hardware numbering, never 0 (which is COMBINED / LOD).
+static inline void g_combine_raw(uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t aa, uint32_t ab, uint32_t ac, uint32_t ad) {
+    cmd(0xFC000000u | (a << 20) | (c << 15) | (aa << 12) | (ac << 9) | (a << 5) | c,
+        (b << 28) | (b << 24) | (aa << 21) | (ac << 18) | (d << 15) | (ab << 12) | (ad << 9) | (d << 6) | (ab << 3) | ad);
+}
+static inline void g_combine_shade() { g_combine_raw(15, 15, 31, 4, 7, 7, 7, 4); }
 // TEXEL0 * SHADE for color and alpha.
-static inline void g_combine_tex_shade() { cmd(0xFC000000u | (1u << 20) | (4u << 15) | (1u << 12) | (4u << 9), 0); }
+static inline void g_combine_tex_shade() { g_combine_raw(1, 15, 4, 7, 1, 7, 4, 7); }
 static inline void g_settimg(uint32_t fmt, uint32_t siz, uint32_t width, uint32_t addr) {
     cmd(0xFD000000u | (fmt << 21) | (siz << 19) | (width - 1), addr);
 }

@@ -59,7 +59,7 @@ struct GfxGLSL {
 };
 
 // Builds the vertex and fragment shader for a combiner id (see gfx_cc.h). Returns false if a source buffer overflowed.
-bool gfx_opengl_build_glsl(uint32_t shader_id, enum GfxGLSLFlavor flavor, struct GfxGLSL *out);
+bool gfx_opengl_build_glsl(uint64_t shader_id, enum GfxGLSLFlavor flavor, struct GfxGLSL *out);
 
 #ifdef __cplusplus
 }

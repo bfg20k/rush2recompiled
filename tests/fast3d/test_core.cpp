@@ -23,7 +23,7 @@ extern "C" {
 // ---- null backend --------------------------------------------------------------------------------------------------
 
 struct ShaderProgram {
-    uint32_t id;
+    uint64_t id;
 };
 
 struct Draw {
@@ -37,17 +37,17 @@ struct Upload {
 
 static std::vector<Draw> g_draws;
 static std::vector<Upload> g_uploads;
-static std::map<uint32_t, ShaderProgram> g_shaders;
+static std::map<uint64_t, ShaderProgram> g_shaders;
 static uint32_t g_next_texture = 1;
 
 static bool nb_z01() { return false; }
 static void nb_unload(ShaderProgram *) {}
 static void nb_load(ShaderProgram *) {}
-static ShaderProgram *nb_create(uint32_t id) {
+static ShaderProgram *nb_create(uint64_t id) {
     g_shaders[id] = ShaderProgram{id};
     return &g_shaders[id];
 }
-static ShaderProgram *nb_lookup(uint32_t id) {
+static ShaderProgram *nb_lookup(uint64_t id) {
     auto it = g_shaders.find(id);
     return it == g_shaders.end() ? nullptr : &it->second;
 }
@@ -462,10 +462,29 @@ static void test_tmem_palettes() {
     for (uint8_t i : hi) expect.insert(expect.end(), {red(i % 31 + 1), 0, 0, 255});
     upload_is(ups, 0, 8, 1, expect, "CI8 with a 256-entry palette");
 
+    // TLUT type IA16 (G_SETOTHERMODE_H bits 14-15 = 3): entries are intensity (high byte) + alpha (low byte).
+    for (int i = 0; i < 256; i++) h16(PAL256 + i * 2, (uint16_t)((i << 8) | (255 - i)));
+    put_bytes(TEX, {1, 2, 3, 4, 5, 6, 7, 8});
+    ups = draw_with_texture([&] {
+        g_othermode_h(14, 2, 3u << 14);
+        g_settimg(0, 2, 256, PAL256);
+        g_settile(0, 2, 0, 256, 7);
+        g_loadtlut(7, 256);
+        g_settimg(2, 2, 8, TEX);
+        g_settile(2, 2, 0, 0, 7);
+        g_loadblock(7, 7);
+        g_settile(2, 1, 1, 0, 0);
+        g_settilesize(0, 8, 1);
+    });
+    expect.clear();
+    for (int i = 1; i <= 8; i++) expect.insert(expect.end(), {(uint8_t)i, (uint8_t)i, (uint8_t)i, (uint8_t)(255 - i)});
+    upload_is(ups, 0, 8, 1, expect, "CI8 with an IA16 palette");
+
     // pal16: palette 0 of a CI4 texture, entries 4..15 included.
     for (int i = 0; i < 16; i++) h16(PAL256 + i * 2, (uint16_t)(((i + 8) << 11) | 1));
     put_bytes(TEX, {0x4B, 0xFE, 0x57, 0x9A, 0x00, 0x00, 0x00, 0x00});
     ups = draw_with_texture([&] {
+        g_othermode_h(14, 2, 2u << 14); // back to RGBA16 palettes
         g_settimg(0, 2, 16, PAL256);
         g_settile(0, 2, 0, 256, 7);
         g_loadtlut(7, 16);

@@ -82,13 +82,15 @@ static struct {
 } gfx_texture_cache;
 
 struct ColorCombiner {
-    uint32_t cc_id;
+    uint64_t cc_id;
     struct ShaderProgram *prg;
-    uint8_t shader_input_mapping[2][4];
+    uint8_t num_inputs;
+    uint8_t input_kind[4]; // CCIN_* of each per-vertex combiner input, in the order the vertex writes them
 };
 
-static struct ColorCombiner color_combiner_pool[64];
-static uint8_t color_combiner_pool_size;
+#define COMBINER_POOL_MAX 512
+static struct ColorCombiner color_combiner_pool[COMBINER_POOL_MAX];
+static uint32_t color_combiner_pool_size;
 
 static struct RSP {
     float modelview_matrix_stack[11][4][4];
@@ -129,7 +131,8 @@ static struct RDP {
     bool textures_changed[2];
     
     uint32_t other_mode_l, other_mode_h;
-    uint32_t combine_mode;
+    uint64_t combine_mode; // both cycles of G_SETCOMBINE in gfx_cc.h packing, without option bits
+    uint8_t prim_lod_frac;
     
     struct RGBA env_color, prim_color, fog_color, fill_color;
     struct XYWidthHeight viewport, scissor;
@@ -176,7 +179,7 @@ static void gfx_flush(void) {
     }
 }
 
-static struct ShaderProgram *gfx_lookup_or_create_shader_program(uint32_t shader_id) {
+static struct ShaderProgram *gfx_lookup_or_create_shader_program(uint64_t shader_id) {
     struct ShaderProgram *prg = gfx_rapi->lookup_shader(shader_id);
     if (prg == NULL) {
         gfx_rapi->unload_shader(rendering_state.shader_program);
@@ -186,54 +189,16 @@ static struct ShaderProgram *gfx_lookup_or_create_shader_program(uint32_t shader
     return prg;
 }
 
-static void gfx_generate_cc(struct ColorCombiner *comb, uint32_t cc_id) {
-    uint8_t c[2][4];
-    uint32_t shader_id = (cc_id >> 24) << 24;
-    uint8_t shader_input_mapping[2][4] = {{0}};
-    for (int i = 0; i < 4; i++) {
-        c[0][i] = (cc_id >> (i * 3)) & 7;
-        c[1][i] = (cc_id >> (12 + i * 3)) & 7;
-    }
-    for (int i = 0; i < 2; i++) {
-        if (c[i][0] == c[i][1] || c[i][2] == CC_0) {
-            c[i][0] = c[i][1] = c[i][2] = 0;
-        }
-        uint8_t input_number[8] = {0};
-        int next_input_number = SHADER_INPUT_1;
-        for (int j = 0; j < 4; j++) {
-            int val = 0;
-            switch (c[i][j]) {
-                case CC_0:
-                    break;
-                case CC_TEXEL0:
-                    val = SHADER_TEXEL0;
-                    break;
-                case CC_TEXEL1:
-                    val = SHADER_TEXEL1;
-                    break;
-                case CC_TEXEL0A:
-                    val = SHADER_TEXEL0A;
-                    break;
-                case CC_PRIM:
-                case CC_SHADE:
-                case CC_ENV:
-                case CC_LOD:
-                    if (input_number[c[i][j]] == 0) {
-                        shader_input_mapping[i][next_input_number - 1] = c[i][j];
-                        input_number[c[i][j]] = next_input_number++;
-                    }
-                    val = input_number[c[i][j]];
-                    break;
-            }
-            shader_id |= val << (i * 12 + j * 3);
-        }
-    }
+static void gfx_generate_cc(struct ColorCombiner *comb, uint64_t cc_id) {
+    struct CCFeatures f;
+    gfx_cc_get_features(cc_id, &f);
     comb->cc_id = cc_id;
-    comb->prg = gfx_lookup_or_create_shader_program(shader_id);
-    memcpy(comb->shader_input_mapping, shader_input_mapping, sizeof(shader_input_mapping));
+    comb->num_inputs = (uint8_t)f.num_inputs;
+    memcpy(comb->input_kind, f.input_kind, sizeof(comb->input_kind));
+    comb->prg = gfx_lookup_or_create_shader_program(cc_id);
 }
 
-static struct ColorCombiner *gfx_lookup_or_create_color_combiner(uint32_t cc_id) {
+static struct ColorCombiner *gfx_lookup_or_create_color_combiner(uint64_t cc_id) {
     static struct ColorCombiner *prev_combiner;
     if (prev_combiner != NULL && prev_combiner->cc_id == cc_id) {
         return prev_combiner;
@@ -245,6 +210,10 @@ static struct ColorCombiner *gfx_lookup_or_create_color_combiner(uint32_t cc_id)
         }
     }
     gfx_flush();
+    if (color_combiner_pool_size >= COMBINER_POOL_MAX) {
+        color_combiner_pool_size = 0; // the programs live in the backend's table; only these small records are rebuilt
+        prev_combiner = NULL;
+    }
     struct ColorCombiner *comb = &color_combiner_pool[color_combiner_pool_size++];
     gfx_generate_cc(comb, cc_id);
     return prev_combiner = comb;
@@ -302,7 +271,7 @@ static uint64_t gfx_fnv1a(uint64_t h, const uint8_t *data, size_t n) {
 #define F3D_LOG_MAX 160
 static uint64_t f3d_log_seen[F3D_LOG_MAX];
 static int f3d_log_count;
-static void f3d_log_once(uint64_t key, const char *fmt, uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e, uint32_t f) {
+static void f3d_log_once(uint64_t key, const char *fmt, uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e, uint32_t f, uint32_t g) {
     key |= 1;
     for (int i = 0; i < f3d_log_count; i++) {
         if (f3d_log_seen[i] == key) {
@@ -313,7 +282,7 @@ static void f3d_log_once(uint64_t key, const char *fmt, uint32_t a, uint32_t b, 
         return;
     }
     f3d_log_seen[f3d_log_count++] = key;
-    fprintf(stderr, fmt, a, b, c, d, e, f);
+    fprintf(stderr, fmt, a, b, c, d, e, f, g);
 }
 
 // A format or state the core cannot decode yet draws as a 2x2 magenta texture instead of aborting the game.
@@ -378,6 +347,7 @@ static void tile_dims(const struct TileDesc *t, uint32_t *x0, uint32_t *y0, uint
 }
 
 // Cache key: the bytes of the region, the sizes that shape the image, and the palette for CI textures.
+static inline bool tlut_is_ia16(void);
 static uint64_t gfx_texture_key(const struct TileDesc *t, uint32_t x0, uint32_t y0, uint32_t w, uint32_t h) {
     uint32_t bits = k_siz_bits[t->siz];
     uint32_t stride = tile_stride(t);
@@ -393,9 +363,14 @@ static uint64_t gfx_texture_key(const struct TileDesc *t, uint32_t x0, uint32_t 
     k = (k ^ ((uint64_t)w << 32 | h)) * 0x100000001b3ULL;
     k = (k ^ ((uint64_t)t->siz << 8 | t->fmt)) * 0x100000001b3ULL;
     if (t->fmt == G_IM_FMT_CI) {
-        k = (k ^ tlut_hash ^ t->palette) * 0x100000001b3ULL;
+        k = (k ^ tlut_hash ^ t->palette ^ ((uint64_t)tlut_is_ia16() << 12)) * 0x100000001b3ULL;
     }
     return k | 1; // 0 means "unused node"
+}
+
+// G_SETOTHERMODE_H bits 14-15 (G_MDSFT_TEXTLUT): 2 = palette entries are RGBA5551, 3 = IA16 (intensity high byte, alpha low).
+static inline bool tlut_is_ia16(void) {
+    return ((rdp.other_mode_h >> 14) & 3) == 3;
 }
 
 static void put_rgba5551(uint8_t *out, uint16_t c) {
@@ -415,7 +390,7 @@ static void import_texture(int slot) {
 
     if (w == 0 || h == 0 || w * h > 8192 || stride == 0) {
         f3d_log_once(0x1000000000ULL ^ ((uint64_t)t->fmt << 40) ^ ((uint64_t)t->siz << 36) ^ ((uint64_t)t->line << 20) ^ (w << 10) ^ h,
-                     "[fast3d] unsupported texture: fmt=%u siz=%u line=%u tmem=%u size=%ux%u\n", t->fmt, t->siz, t->line, t->tmem, w, h);
+                     "[fast3d] unsupported texture: fmt=%u siz=%u line=%u tmem=%u size=%ux%u%.0u\n", t->fmt, t->siz, t->line, t->tmem, w, h, 0);
         gfx_import_unsupported(slot); // a tile that was never set up
         return;
     }
@@ -461,7 +436,13 @@ static void import_texture(int slot) {
                     break;
                 case G_IM_FMT_CI: {
                     uint32_t idx = t->siz == G_IM_SIZ_8b ? b0 : (uint32_t)t->palette * 16 + nib;
-                    put_rgba5551(out, tlut[idx & 255]);
+                    uint16_t e = tlut[idx & 255];
+                    if (tlut_is_ia16()) {
+                        out[0] = out[1] = out[2] = (uint8_t)(e >> 8);
+                        out[3] = (uint8_t)e;
+                    } else {
+                        put_rgba5551(out, e);
+                    }
                     break;
                 }
             }
@@ -750,28 +731,29 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
         rdp.viewport_or_scissor_changed = false;
     }
     
-    uint32_t cc_id = rdp.combine_mode;
-    f3d_log_once(((uint64_t)rdp.combine_mode << 32) ^ rdp.other_mode_l ^ ((uint64_t)rdp.other_mode_h << 7) ^ ((uint64_t)rsp.geometry_mode << 13),
-                 "[fast3d] draw: combine(c0 rgb/alpha)=%06x cycle=%u omL=%08x omH=%08x geom=%08x lights=%u\n",
-                 rdp.combine_mode, (rdp.other_mode_h >> G_MDSFT_CYCLETYPE) & 3, rdp.other_mode_l, rdp.other_mode_h, rsp.geometry_mode, rsp.current_num_lights);
+    const uint32_t cycle_type = (rdp.other_mode_h >> G_MDSFT_CYCLETYPE) & 3;
+    const bool two_cycle = cycle_type == 1;
+    uint64_t cc_id = rdp.combine_mode;
+    f3d_log_once(rdp.combine_mode * 0x9E3779B97F4A7C15ull ^ ((uint64_t)rdp.other_mode_l << 20) ^ ((uint64_t)rdp.other_mode_h << 3) ^ ((uint64_t)rsp.geometry_mode << 41),
+                 "[fast3d] draw: combine=%07x:%07x cycle=%u omL=%08x omH=%08x geom=%08x lights=%u\n",
+                 (uint32_t)(rdp.combine_mode >> 28), (uint32_t)rdp.combine_mode & 0xFFFFFFF, cycle_type, rdp.other_mode_l, rdp.other_mode_h, rsp.geometry_mode, rsp.current_num_lights);
     
-    bool use_alpha = (rdp.other_mode_l & (G_BL_A_MEM << 18)) == 0;
+    // The framebuffer blend is only needed when the blender mixes with what is already there by (1 - alpha), i.e.
+    // P*A + M*(1-A) with M = CLR_MEM (the *_XLU_* render modes). Opaque modes (including the AA ones that use A_MEM
+    // coverage, fog-only blends and decals) must not take the combiner's alpha as translucency. The final blender
+    // cycle holds the fields: cycle 2 in two-cycle mode, cycle 1 otherwise.
+    const uint32_t m2a_shift = two_cycle ? 20 : 22, m2b_shift = two_cycle ? 16 : 18;
+    bool use_alpha = ((rdp.other_mode_l >> m2a_shift) & 3) == 1 /*G_BL_CLR_MEM*/ && ((rdp.other_mode_l >> m2b_shift) & 3) == 0 /*G_BL_1MA*/;
     bool use_fog = (rdp.other_mode_l >> 30) == G_BL_CLR_FOG;
-    bool texture_edge = (rdp.other_mode_l & CVG_X_ALPHA) == CVG_X_ALPHA;
+    // Alpha cutouts: coverage-times-alpha modes and the alpha-compare threshold both discard transparent texels.
+    bool texture_edge = (rdp.other_mode_l & CVG_X_ALPHA) == CVG_X_ALPHA || (rdp.other_mode_l & 3) == 1 /*G_AC_THRESHOLD*/;
     bool use_noise = (rdp.other_mode_l & G_AC_DITHER) == G_AC_DITHER;
     
-    if (texture_edge) {
-        use_alpha = true;
-    }
-    
+    if (two_cycle) cc_id |= SHADER_OPT_TWO_CYCLE;
     if (use_alpha) cc_id |= SHADER_OPT_ALPHA;
     if (use_fog) cc_id |= SHADER_OPT_FOG;
     if (texture_edge) cc_id |= SHADER_OPT_TEXTURE_EDGE;
     if (use_noise) cc_id |= SHADER_OPT_NOISE;
-    
-    if (!use_alpha) {
-        cc_id &= ~0xfff000;
-    }
     
     struct ColorCombiner *comb = gfx_lookup_or_create_color_combiner(cc_id);
     struct ShaderProgram *prg = comb->prg;
@@ -848,47 +830,40 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
             buf_vbo[buf_vbo_len++] = v_arr[i]->color.a / 255.0f; // fog factor (not alpha)
         }
         
-        for (int j = 0; j < num_inputs; j++) {
-            struct RGBA *color;
-            struct RGBA tmp;
-            for (int k = 0; k < 1 + (use_alpha ? 1 : 0); k++) {
-                switch (comb->shader_input_mapping[k][j]) {
-                    case CC_PRIM:
-                        color = &rdp.prim_color;
-                        break;
-                    case CC_SHADE:
-                        color = &v_arr[i]->color;
-                        break;
-                    case CC_ENV:
-                        color = &rdp.env_color;
-                        break;
-                    case CC_LOD:
-                    {
-                        float distance_frac = (v1->w - 3000.0f) / 3000.0f;
-                        if (distance_frac < 0.0f) distance_frac = 0.0f;
-                        if (distance_frac > 1.0f) distance_frac = 1.0f;
-                        tmp.r = tmp.g = tmp.b = tmp.a = distance_frac * 255.0f;
-                        color = &tmp;
-                        break;
-                    }
-                    default:
-                        memset(&tmp, 0, sizeof(tmp));
-                        color = &tmp;
-                        break;
-                }
-                if (k == 0) {
-                    buf_vbo[buf_vbo_len++] = color->r / 255.0f;
-                    buf_vbo[buf_vbo_len++] = color->g / 255.0f;
-                    buf_vbo[buf_vbo_len++] = color->b / 255.0f;
-                } else {
-                    if (use_fog && color == &v_arr[i]->color) {
-                        // Shade alpha is 100% for fog
-                        buf_vbo[buf_vbo_len++] = 1.0f;
-                    } else {
-                        buf_vbo[buf_vbo_len++] = color->a / 255.0f;
-                    }
+        for (int j = 0; j < comb->num_inputs; j++) {
+            float x[4];
+            switch (comb->input_kind[j]) {
+                case CCIN_SHADE:
+                    x[0] = v_arr[i]->color.r / 255.0f;
+                    x[1] = v_arr[i]->color.g / 255.0f;
+                    x[2] = v_arr[i]->color.b / 255.0f;
+                    x[3] = use_fog ? 1.0f : v_arr[i]->color.a / 255.0f; // with fog the vertex alpha holds the fog factor
+                    break;
+                case CCIN_PRIM:
+                    x[0] = rdp.prim_color.r / 255.0f;
+                    x[1] = rdp.prim_color.g / 255.0f;
+                    x[2] = rdp.prim_color.b / 255.0f;
+                    x[3] = rdp.prim_color.a / 255.0f;
+                    break;
+                case CCIN_ENV:
+                    x[0] = rdp.env_color.r / 255.0f;
+                    x[1] = rdp.env_color.g / 255.0f;
+                    x[2] = rdp.env_color.b / 255.0f;
+                    x[3] = rdp.env_color.a / 255.0f;
+                    break;
+                default:
+                {
+                    float distance_frac = (v1->w - 3000.0f) / 3000.0f;
+                    if (distance_frac < 0.0f) distance_frac = 0.0f;
+                    if (distance_frac > 1.0f) distance_frac = 1.0f;
+                    x[0] = distance_frac;
+                    x[1] = rdp.prim_lod_frac / 255.0f;
+                    x[2] = x[3] = 0.0f;
+                    break;
                 }
             }
+            memcpy(&buf_vbo[buf_vbo_len], x, sizeof(x));
+            buf_vbo_len += 4;
         }
         /*struct RGBA *color = &v_arr[i]->color;
         buf_vbo[buf_vbo_len++] = color->r / 255.0f;
@@ -1115,36 +1090,13 @@ static void gfx_dp_load_tile(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t 
 }
 
 
-static uint8_t color_comb_component(uint32_t v) {
-    switch (v) {
-        case G_CCMUX_TEXEL0:
-            return CC_TEXEL0;
-        case G_CCMUX_TEXEL1:
-            return CC_TEXEL1;
-        case G_CCMUX_PRIMITIVE:
-            return CC_PRIM;
-        case G_CCMUX_SHADE:
-            return CC_SHADE;
-        case G_CCMUX_ENVIRONMENT:
-            return CC_ENV;
-        case G_CCMUX_TEXEL0_ALPHA:
-            return CC_TEXEL0A;
-        case G_CCMUX_LOD_FRACTION:
-            return CC_LOD;
-        default:
-            return CC_0;
-    }
+// Combiner for the fixed-function cases: d only (color and alpha), everything else 0.
+static uint64_t cc_only(uint32_t rgb_d, uint32_t alpha_d) {
+    return gfx_cc_pack_cycle(15, 15, 31, rgb_d, 7, 7, 7, alpha_d);
 }
 
-static inline uint32_t color_comb(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
-    return color_comb_component(a) |
-           (color_comb_component(b) << 3) |
-           (color_comb_component(c) << 6) |
-           (color_comb_component(d) << 9);
-}
-
-static void gfx_dp_set_combine_mode(uint32_t rgb, uint32_t alpha) {
-    rdp.combine_mode = rgb | (alpha << 12);
+static void gfx_dp_set_combine_mode(uint64_t id) {
+    rdp.combine_mode = id;
 }
 
 static void gfx_dp_set_env_color(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
@@ -1249,14 +1201,14 @@ static void gfx_draw_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lr
 }
 
 static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint8_t tile, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip) {
-    uint32_t saved_combine_mode = rdp.combine_mode;
+    uint64_t saved_combine_mode = rdp.combine_mode;
     if ((rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_COPY) {
         // Per RDP Command Summary Set Tile's shift s and this dsdx should be set to 4 texels
         // Divide by 4 to get 1 instead
         dsdx >>= 2;
         
         // Color combiner is turned off in copy mode
-        gfx_dp_set_combine_mode(color_comb(0, 0, 0, G_CCMUX_TEXEL0), color_comb(0, 0, 0, G_ACMUX_TEXEL0));
+        gfx_dp_set_combine_mode(cc_only(1 /*TEXEL0*/, 1 /*TEXEL0 alpha*/));
         
         // Per documentation one extra pixel is added in this modes to each edge
         lrx += 1 << 2;
@@ -1296,7 +1248,19 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
         ur->v = lrt;
     }
     
+    // The rectangle names its own tile; G_TEXTURE (which triangles use) may have selected another one.
+    const uint8_t saved_tex_level = tex_level;
+    if ((tile & 7) != tex_level) {
+        gfx_flush();
+        tex_level = tile & 7;
+        rdp.textures_changed[0] = rdp.textures_changed[1] = true;
+    }
     gfx_draw_rectangle(ulx, uly, lrx, lry);
+    if (tex_level != saved_tex_level) {
+        gfx_flush();
+        tex_level = saved_tex_level;
+        rdp.textures_changed[0] = rdp.textures_changed[1] = true;
+    }
     rdp.combine_mode = saved_combine_mode;
 }
 
@@ -1318,8 +1282,8 @@ static void gfx_dp_fill_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t
         v->color = rdp.fill_color;
     }
     
-    uint32_t saved_combine_mode = rdp.combine_mode;
-    gfx_dp_set_combine_mode(color_comb(0, 0, 0, G_CCMUX_SHADE), color_comb(0, 0, 0, G_ACMUX_SHADE));
+    uint64_t saved_combine_mode = rdp.combine_mode;
+    gfx_dp_set_combine_mode(cc_only(4 /*SHADE*/, 4 /*SHADE alpha*/));
     gfx_draw_rectangle(ulx, uly, lrx, lry);
     rdp.combine_mode = saved_combine_mode;
 }
@@ -1336,6 +1300,9 @@ static void gfx_sp_set_other_mode(uint32_t shift, uint32_t num_bits, uint64_t mo
     uint64_t mask = (((uint64_t)1 << num_bits) - 1) << shift;
     uint64_t om = rdp.other_mode_l | ((uint64_t)rdp.other_mode_h << 32);
     om = (om & ~mask) | mode;
+    if ((((uint64_t)rdp.other_mode_h << 32) ^ om) & ((uint64_t)3 << (32 + 14))) {
+        rdp.textures_changed[0] = rdp.textures_changed[1] = true; // palette type changed: CI textures decode differently
+    }
     rdp.other_mode_l = (uint32_t)om;
     rdp.other_mode_h = (uint32_t)(om >> 32);
 }
@@ -1503,6 +1470,7 @@ static void gfx_run_dl(Gfx* cmd) {
                 gfx_dp_set_env_color(C1(24, 8), C1(16, 8), C1(8, 8), C1(0, 8));
                 break;
             case G_SETPRIMCOLOR:
+                rdp.prim_lod_frac = (uint8_t)C0(0, 8);
                 gfx_dp_set_prim_color(C1(24, 8), C1(16, 8), C1(8, 8), C1(0, 8));
                 break;
             case G_SETFOGCOLOR:
@@ -1512,11 +1480,10 @@ static void gfx_run_dl(Gfx* cmd) {
                 gfx_dp_set_fill_color(cmd->words.w1);
                 break;
             case G_SETCOMBINE:
+                // Both cycles in the RDP's own field numbering (gfx_cc.h resolves it per slot).
                 gfx_dp_set_combine_mode(
-                    color_comb(C0(20, 4), C1(28, 4), C0(15, 5), C1(15, 3)),
-                    color_comb(C0(12, 3), C1(12, 3), C0(9, 3), C1(9, 3)));
-                    /*color_comb(C0(5, 4), C1(24, 4), C0(0, 5), C1(6, 3)),
-                    color_comb(C1(21, 3), C1(3, 3), C1(18, 3), C1(0, 3)));*/
+                    gfx_cc_pack_cycle(C0(20, 4), C1(28, 4), C0(15, 5), C1(15, 3), C0(12, 3), C1(12, 3), C0(9, 3), C1(9, 3)) |
+                    (gfx_cc_pack_cycle(C0(5, 4), C1(24, 4), C0(0, 5), C1(6, 3), C1(21, 3), C1(3, 3), C1(18, 3), C1(0, 3)) << 28));
                 break;
             // G_SETPRIMCOLOR, G_CCMUX_PRIMITIVE, G_ACMUX_PRIMITIVE, is used by Goddard
             // G_CCMUX_TEXEL1, LOD_FRACTION is used in Bowser room 1
