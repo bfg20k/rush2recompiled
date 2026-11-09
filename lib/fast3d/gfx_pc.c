@@ -54,11 +54,15 @@ struct LoadedVertex {
 // RDRAM access state. g_rdram is the recompiled game's RDRAM; g_segments is the RSP segment table (G_MW_SEGMENT).
 static uint8_t *g_rdram;
 static uint32_t g_segments[16];
-// TMEM-style snapshots: bytes are copied out of RDRAM in canonical (big-endian byte order) at load time, so the
-// import_texture_* functions below index them directly. tmem_canon[tile] holds the last G_LOADBLOCK/G_LOADTILE data.
-static uint8_t tmem_canon[2][4096];
-static uint8_t pal_canon[512];
-static uint64_t pal_hash;
+// TMEM model. The RDP loads textures into 4 KB of texture memory and eight tile descriptors say how to read them back;
+// games rely on that (several textures resident at once, sizes from G_SETTILESIZE, rows at the tile's line stride). Loads
+// copy bytes out of RDRAM into `tmem` in canonical (big-endian) byte order. The hardware's odd-row word swaps are not
+// modeled: they cancel between a load and the matching sample. RGBA32 is kept as plain 4-byte texels (the hardware splits
+// it over two banks), and palette entries live in `tlut`, one slot per 64-bit TMEM word starting at word 256.
+static uint8_t tmem[4096];
+static uint16_t tlut[256];
+static uint64_t tlut_hash;
+static uint8_t tex_level; // G_TEXTURE's tile: TEXEL0 reads this tile and TEXEL1 the next one
 
 struct TextureHashmapNode {
     struct TextureHashmapNode *next;
@@ -110,23 +114,17 @@ static struct RSP {
 } rsp;
 
 static struct RDP {
-    const uint8_t *palette;
     struct {
-        const uint8_t *addr;
+        const uint8_t *addr; // G_SETTIMG source in RDRAM
         uint8_t siz;
-        uint8_t tile_number;
-    } texture_to_load;
-    struct {
-        const uint8_t *addr;
-        uint32_t size_bytes;
-    } loaded_texture[2];
-    struct {
-        uint8_t fmt;
-        uint8_t siz;
-        uint8_t cms, cmt;
+        uint32_t width;      // texels
+    } timg;
+    struct TileDesc {
+        uint8_t fmt, siz, palette;
+        uint8_t cms, cmt, masks, maskt;
+        uint16_t line, tmem;         // 64-bit words
         uint16_t uls, ult, lrs, lrt; // U10.2
-        uint32_t line_size_bytes;
-    } texture_tile;
+    } tiles[8];
     bool textures_changed[2];
     
     uint32_t other_mode_l, other_mode_h;
@@ -298,285 +296,156 @@ static uint64_t gfx_fnv1a(uint64_t h, const uint8_t *data, size_t n) {
     return h;
 }
 
-// Copies the just-loaded texture bytes out of RDRAM (rdp.loaded_texture[tile].size_bytes must already be set).
-static void gfx_snapshot_texture(int tile) {
-    uint32_t size = rdp.loaded_texture[tile].size_bytes;
-    if (size > sizeof(tmem_canon[0])) {
-        size = sizeof(tmem_canon[0]);
-        rdp.loaded_texture[tile].size_bytes = size;
-    }
-    for (uint32_t i = 0; i < size; i++) {
-        tmem_canon[tile][i] = rdram_byte(rdp.texture_to_load.addr, i);
-    }
-    rdp.loaded_texture[tile].addr = tmem_canon[tile];
-}
-
-static void gfx_snapshot_palette(uint32_t high_index) {
-    uint32_t entries = (high_index >> 2) + 1; // high_index is a 10.2 texel index
-    if (entries > 256) {
-        entries = 256;
-    }
-    memset(pal_canon, 0, sizeof(pal_canon));
-    for (uint32_t i = 0; i < entries * 2; i++) {
-        pal_canon[i] = rdram_byte(rdp.texture_to_load.addr, i);
-    }
-    pal_hash = gfx_fnv1a(0xcbf29ce484222325ULL, pal_canon, entries * 2);
-    rdp.palette = pal_canon;
-}
-
-// Cache key: the bytes, the sizes that shape the image, and the palette for CI textures.
-static uint64_t gfx_texture_key(int tile, uint8_t fmt, uint8_t siz) {
-    uint64_t h = 0xcbf29ce484222325ULL;
-    if (rdp.loaded_texture[tile].addr != NULL) {
-        h = gfx_fnv1a(h, rdp.loaded_texture[tile].addr, rdp.loaded_texture[tile].size_bytes);
-    }
-    h = (h ^ rdp.loaded_texture[tile].size_bytes) * 0x100000001b3ULL;
-    h = (h ^ rdp.texture_tile.line_size_bytes) * 0x100000001b3ULL;
-    if (fmt == G_IM_FMT_CI) {
-        h = (h ^ pal_hash) * 0x100000001b3ULL;
-    }
-    return h | 1; // 0 means "unused node"
-}
-
 // A format or state the core cannot decode yet draws as a 2x2 magenta texture instead of aborting the game.
 static void gfx_import_unsupported(int tile) {
     static const uint8_t magenta[16] = {255, 0, 255, 255, 255, 0, 255, 255, 255, 0, 255, 255, 255, 0, 255, 255};
     gfx_rapi->upload_texture(magenta, 2, 2);
 }
 
-static void import_texture_rgba16(int tile) {
-    uint8_t rgba32_buf[8192];
-    
-    for (uint32_t i = 0; i < rdp.loaded_texture[tile].size_bytes / 2; i++) {
-        uint16_t col16 = (rdp.loaded_texture[tile].addr[2 * i] << 8) | rdp.loaded_texture[tile].addr[2 * i + 1];
-        uint8_t a = col16 & 1;
-        uint8_t r = col16 >> 11;
-        uint8_t g = (col16 >> 6) & 0x1f;
-        uint8_t b = (col16 >> 1) & 0x1f;
-        rgba32_buf[4*i + 0] = SCALE_5_8(r);
-        rgba32_buf[4*i + 1] = SCALE_5_8(g);
-        rgba32_buf[4*i + 2] = SCALE_5_8(b);
-        rgba32_buf[4*i + 3] = a ? 255 : 0;
+static const uint8_t k_siz_bits[4] = {4, 8, 16, 32};
+
+// Canonical bytes out of RDRAM (byte at A lives at rdram[A ^ 3]; an aligned word reads natively as its four bytes, high
+// byte first), a word at a time where aligned.
+static void rdram_copy(uint8_t *dst, uint32_t off, uint32_t n) {
+    uint32_t i = 0;
+    for (; i < n && ((off + i) & 3) != 0; i++) {
+        dst[i] = g_rdram[(off + i) ^ 3];
     }
-    
-    uint32_t width = rdp.texture_tile.line_size_bytes / 2;
-    uint32_t height = rdp.loaded_texture[tile].size_bytes / rdp.texture_tile.line_size_bytes;
-    
-    gfx_rapi->upload_texture(rgba32_buf, width, height);
-}
-
-static void import_texture_rgba32(int tile) {
-    uint32_t width = rdp.texture_tile.line_size_bytes / 2;
-    uint32_t height = (rdp.loaded_texture[tile].size_bytes / 2) / rdp.texture_tile.line_size_bytes;
-    gfx_rapi->upload_texture(rdp.loaded_texture[tile].addr, width, height);
-}
-
-static void import_texture_ia4(int tile) {
-    uint8_t rgba32_buf[32768];
-    
-    for (uint32_t i = 0; i < rdp.loaded_texture[tile].size_bytes * 2; i++) {
-        uint8_t byte = rdp.loaded_texture[tile].addr[i / 2];
-        uint8_t part = (byte >> (4 - (i % 2) * 4)) & 0xf;
-        uint8_t intensity = part >> 1;
-        uint8_t alpha = part & 1;
-        uint8_t r = intensity;
-        uint8_t g = intensity;
-        uint8_t b = intensity;
-        rgba32_buf[4*i + 0] = SCALE_3_8(r);
-        rgba32_buf[4*i + 1] = SCALE_3_8(g);
-        rgba32_buf[4*i + 2] = SCALE_3_8(b);
-        rgba32_buf[4*i + 3] = alpha ? 255 : 0;
+    for (; i + 4 <= n; i += 4) {
+        uint32_t w;
+        memcpy(&w, g_rdram + off + i, 4);
+        dst[i] = (uint8_t)(w >> 24);
+        dst[i + 1] = (uint8_t)(w >> 16);
+        dst[i + 2] = (uint8_t)(w >> 8);
+        dst[i + 3] = (uint8_t)w;
     }
-    
-    uint32_t width = rdp.texture_tile.line_size_bytes * 2;
-    uint32_t height = rdp.loaded_texture[tile].size_bytes / rdp.texture_tile.line_size_bytes;
-    
-    gfx_rapi->upload_texture(rgba32_buf, width, height);
-}
-
-static void import_texture_ia8(int tile) {
-    uint8_t rgba32_buf[16384];
-    
-    for (uint32_t i = 0; i < rdp.loaded_texture[tile].size_bytes; i++) {
-        uint8_t intensity = rdp.loaded_texture[tile].addr[i] >> 4;
-        uint8_t alpha = rdp.loaded_texture[tile].addr[i] & 0xf;
-        uint8_t r = intensity;
-        uint8_t g = intensity;
-        uint8_t b = intensity;
-        rgba32_buf[4*i + 0] = SCALE_4_8(r);
-        rgba32_buf[4*i + 1] = SCALE_4_8(g);
-        rgba32_buf[4*i + 2] = SCALE_4_8(b);
-        rgba32_buf[4*i + 3] = SCALE_4_8(alpha);
+    for (; i < n; i++) {
+        dst[i] = g_rdram[(off + i) ^ 3];
     }
-    
-    uint32_t width = rdp.texture_tile.line_size_bytes;
-    uint32_t height = rdp.loaded_texture[tile].size_bytes / rdp.texture_tile.line_size_bytes;
-    
-    gfx_rapi->upload_texture(rgba32_buf, width, height);
 }
 
-static void import_texture_ia16(int tile) {
-    uint8_t rgba32_buf[8192];
-    
-    for (uint32_t i = 0; i < rdp.loaded_texture[tile].size_bytes / 2; i++) {
-        uint8_t intensity = rdp.loaded_texture[tile].addr[2 * i];
-        uint8_t alpha = rdp.loaded_texture[tile].addr[2 * i + 1];
-        uint8_t r = intensity;
-        uint8_t g = intensity;
-        uint8_t b = intensity;
-        rgba32_buf[4*i + 0] = r;
-        rgba32_buf[4*i + 1] = g;
-        rgba32_buf[4*i + 2] = b;
-        rgba32_buf[4*i + 3] = alpha;
+// Bytes per row of a tile in `tmem` (RGBA32 rows are twice as wide in the plain 4-byte layout).
+static uint32_t tile_stride(const struct TileDesc *t) {
+    return (uint32_t)t->line * 8 * (t->siz == G_IM_SIZ_32b ? 2 : 1);
+}
+
+// The region of the tile a draw samples: from G_SETTILESIZE, limited by the tile's line and by the mask (a power-of-two
+// repeat). Falls back to the line's full width when no sane size was set.
+static void tile_dims(const struct TileDesc *t, uint32_t *x0, uint32_t *y0, uint32_t *w, uint32_t *h) {
+    uint32_t stride = tile_stride(t);
+    uint32_t bits = k_siz_bits[t->siz];
+    uint32_t max_w = stride * 8 / bits;
+    uint32_t ww = t->lrs >= t->uls ? ((uint32_t)(t->lrs - t->uls) >> 2) + 1 : 0;
+    uint32_t hh = t->lrt >= t->ult ? ((uint32_t)(t->lrt - t->ult) >> 2) + 1 : 0;
+    if (ww == 0 || ww > max_w) {
+        ww = max_w;
     }
-    
-    uint32_t width = rdp.texture_tile.line_size_bytes / 2;
-    uint32_t height = rdp.loaded_texture[tile].size_bytes / rdp.texture_tile.line_size_bytes;
-    
-    gfx_rapi->upload_texture(rgba32_buf, width, height);
-}
-
-static void import_texture_i4(int tile) {
-    uint8_t rgba32_buf[32768];
-
-    for (uint32_t i = 0; i < rdp.loaded_texture[tile].size_bytes * 2; i++) {
-        uint8_t byte = rdp.loaded_texture[tile].addr[i / 2];
-        uint8_t part = (byte >> (4 - (i % 2) * 4)) & 0xf;
-        uint8_t intensity = part;
-        uint8_t r = intensity;
-        uint8_t g = intensity;
-        uint8_t b = intensity;
-        rgba32_buf[4*i + 0] = SCALE_4_8(r);
-        rgba32_buf[4*i + 1] = SCALE_4_8(g);
-        rgba32_buf[4*i + 2] = SCALE_4_8(b);
-        rgba32_buf[4*i + 3] = 255;
+    if (t->masks != 0 && (1u << t->masks) < ww) {
+        ww = 1u << t->masks;
     }
-
-    uint32_t width = rdp.texture_tile.line_size_bytes * 2;
-    uint32_t height = rdp.loaded_texture[tile].size_bytes / rdp.texture_tile.line_size_bytes;
-
-    gfx_rapi->upload_texture(rgba32_buf, width, height);
-}
-
-static void import_texture_i8(int tile) {
-    uint8_t rgba32_buf[16384];
-
-    for (uint32_t i = 0; i < rdp.loaded_texture[tile].size_bytes; i++) {
-        uint8_t intensity = rdp.loaded_texture[tile].addr[i];
-        uint8_t r = intensity;
-        uint8_t g = intensity;
-        uint8_t b = intensity;
-        rgba32_buf[4*i + 0] = r;
-        rgba32_buf[4*i + 1] = g;
-        rgba32_buf[4*i + 2] = b;
-        rgba32_buf[4*i + 3] = 255;
+    if (t->maskt != 0 && (1u << t->maskt) < hh) {
+        hh = 1u << t->maskt;
     }
-
-    uint32_t width = rdp.texture_tile.line_size_bytes;
-    uint32_t height = rdp.loaded_texture[tile].size_bytes / rdp.texture_tile.line_size_bytes;
-
-    gfx_rapi->upload_texture(rgba32_buf, width, height);
-}
-
-
-static void import_texture_ci4(int tile) {
-    uint8_t rgba32_buf[32768];
-    
-    for (uint32_t i = 0; i < rdp.loaded_texture[tile].size_bytes * 2; i++) {
-        uint8_t byte = rdp.loaded_texture[tile].addr[i / 2];
-        uint8_t idx = (byte >> (4 - (i % 2) * 4)) & 0xf;
-        uint16_t col16 = (rdp.palette[idx * 2] << 8) | rdp.palette[idx * 2 + 1]; // Big endian load
-        uint8_t a = col16 & 1;
-        uint8_t r = col16 >> 11;
-        uint8_t g = (col16 >> 6) & 0x1f;
-        uint8_t b = (col16 >> 1) & 0x1f;
-        rgba32_buf[4*i + 0] = SCALE_5_8(r);
-        rgba32_buf[4*i + 1] = SCALE_5_8(g);
-        rgba32_buf[4*i + 2] = SCALE_5_8(b);
-        rgba32_buf[4*i + 3] = a ? 255 : 0;
+    uint32_t base = (uint32_t)t->tmem * 8;
+    uint32_t max_h = stride != 0 && base < sizeof(tmem) ? (uint32_t)(sizeof(tmem) - base) / stride : 0;
+    if (hh == 0 || hh > max_h) {
+        hh = max_h;
     }
-    
-    uint32_t width = rdp.texture_tile.line_size_bytes * 2;
-    uint32_t height = rdp.loaded_texture[tile].size_bytes / rdp.texture_tile.line_size_bytes;
-    
-    gfx_rapi->upload_texture(rgba32_buf, width, height);
+    *x0 = t->uls >> 2;
+    *y0 = t->ult >> 2;
+    *w = ww;
+    *h = hh;
 }
 
-static void import_texture_ci8(int tile) {
-    uint8_t rgba32_buf[16384];
-    
-    for (uint32_t i = 0; i < rdp.loaded_texture[tile].size_bytes; i++) {
-        uint8_t idx = rdp.loaded_texture[tile].addr[i];
-        uint16_t col16 = (rdp.palette[idx * 2] << 8) | rdp.palette[idx * 2 + 1]; // Big endian load
-        uint8_t a = col16 & 1;
-        uint8_t r = col16 >> 11;
-        uint8_t g = (col16 >> 6) & 0x1f;
-        uint8_t b = (col16 >> 1) & 0x1f;
-        rgba32_buf[4*i + 0] = SCALE_5_8(r);
-        rgba32_buf[4*i + 1] = SCALE_5_8(g);
-        rgba32_buf[4*i + 2] = SCALE_5_8(b);
-        rgba32_buf[4*i + 3] = a ? 255 : 0;
+// Cache key: the bytes of the region, the sizes that shape the image, and the palette for CI textures.
+static uint64_t gfx_texture_key(const struct TileDesc *t, uint32_t x0, uint32_t y0, uint32_t w, uint32_t h) {
+    uint32_t bits = k_siz_bits[t->siz];
+    uint32_t stride = tile_stride(t);
+    uint64_t k = 0xcbf29ce484222325ULL;
+    uint32_t row_bytes = (w * bits + 7) / 8;
+    for (uint32_t y = 0; y < h; y++) {
+        uint32_t off = (uint32_t)t->tmem * 8 + (y0 + y) * stride + (x0 * bits) / 8;
+        if (off + row_bytes > sizeof(tmem)) {
+            break;
+        }
+        k = gfx_fnv1a(k, tmem + off, row_bytes);
     }
-    
-    uint32_t width = rdp.texture_tile.line_size_bytes;
-    uint32_t height = rdp.loaded_texture[tile].size_bytes / rdp.texture_tile.line_size_bytes;
-    
-    gfx_rapi->upload_texture(rgba32_buf, width, height);
+    k = (k ^ ((uint64_t)w << 32 | h)) * 0x100000001b3ULL;
+    k = (k ^ ((uint64_t)t->siz << 8 | t->fmt)) * 0x100000001b3ULL;
+    if (t->fmt == G_IM_FMT_CI) {
+        k = (k ^ tlut_hash ^ t->palette) * 0x100000001b3ULL;
+    }
+    return k | 1; // 0 means "unused node"
 }
 
-static void import_texture(int tile) {
-    uint8_t fmt = rdp.texture_tile.fmt;
-    uint8_t siz = rdp.texture_tile.siz;
-    
-    if (gfx_texture_cache_lookup(tile, &rendering_state.textures[tile], gfx_texture_key(tile, fmt, siz), fmt, siz)) {
+static void put_rgba5551(uint8_t *out, uint16_t c) {
+    out[0] = SCALE_5_8(c >> 11);
+    out[1] = SCALE_5_8((c >> 6) & 0x1f);
+    out[2] = SCALE_5_8((c >> 1) & 0x1f);
+    out[3] = (c & 1) ? 255 : 0;
+}
+
+static void import_texture(int slot) {
+    static uint8_t rgba[8192 * 4]; // a tile fits in 4 KB: at most 8192 4-bit texels
+    const struct TileDesc *t = &rdp.tiles[(tex_level + slot) & 7];
+    uint32_t x0, y0, w, h;
+    tile_dims(t, &x0, &y0, &w, &h);
+    uint32_t bits = k_siz_bits[t->siz];
+    uint32_t stride = tile_stride(t);
+
+    if (w == 0 || h == 0 || w * h > 8192 || stride == 0) {
+        gfx_import_unsupported(slot); // a tile that was never set up
+        return;
+    }
+    if (gfx_texture_cache_lookup(slot, &rendering_state.textures[slot], gfx_texture_key(t, x0, y0, w, h), t->fmt, t->siz)) {
         return;
     }
 
-    if (rdp.texture_tile.line_size_bytes == 0 || rdp.loaded_texture[tile].addr == NULL || rdp.loaded_texture[tile].size_bytes == 0) {
-        gfx_import_unsupported(tile);
-        return;
+    for (uint32_t y = 0; y < h; y++) {
+        uint32_t row = (uint32_t)t->tmem * 8 + (y0 + y) * stride;
+        for (uint32_t x = 0; x < w; x++) {
+            uint8_t *out = rgba + 4 * (y * w + x);
+            uint32_t tx = x0 + x;
+            uint32_t at = row + (tx * bits) / 8;
+            // Reads past TMEM (a window beyond the rows) give transparent black rather than leaving the array.
+            uint8_t b0 = at < sizeof(tmem) ? tmem[at] : 0;
+            uint8_t b1 = at + 1 < sizeof(tmem) ? tmem[at + 1] : 0;
+            uint8_t nib = (tx & 1) ? (b0 & 0xf) : (b0 >> 4);
+            uint8_t v = 0;
+            out[0] = out[1] = out[2] = out[3] = 0;
+            switch (t->fmt) {
+                case G_IM_FMT_RGBA:
+                    if (t->siz == G_IM_SIZ_16b) {
+                        put_rgba5551(out, (uint16_t)(b0 << 8 | b1));
+                    } else if (t->siz == G_IM_SIZ_32b && at + 3 < sizeof(tmem)) {
+                        memcpy(out, tmem + at, 4);
+                    }
+                    break;
+                case G_IM_FMT_IA:
+                    if (t->siz == G_IM_SIZ_16b) {
+                        out[0] = out[1] = out[2] = b0;
+                        out[3] = b1;
+                    } else if (t->siz == G_IM_SIZ_8b) {
+                        out[0] = out[1] = out[2] = SCALE_4_8(b0 >> 4);
+                        out[3] = SCALE_4_8(b0 & 0xf);
+                    } else if (t->siz == G_IM_SIZ_4b) {
+                        out[0] = out[1] = out[2] = SCALE_3_8(nib >> 1);
+                        out[3] = (nib & 1) ? 255 : 0;
+                    }
+                    break;
+                case G_IM_FMT_I:
+                    v = t->siz == G_IM_SIZ_8b ? b0 : SCALE_4_8(nib);
+                    out[0] = out[1] = out[2] = out[3] = v; // intensity is also the alpha
+                    break;
+                case G_IM_FMT_CI: {
+                    uint32_t idx = t->siz == G_IM_SIZ_8b ? b0 : (uint32_t)t->palette * 16 + nib;
+                    put_rgba5551(out, tlut[idx & 255]);
+                    break;
+                }
+            }
+        }
     }
-
-    int t0 = get_time();
-    if (fmt == G_IM_FMT_RGBA) {
-        if (siz == G_IM_SIZ_16b) {
-            import_texture_rgba16(tile);
-        } else if (siz == G_IM_SIZ_32b) {
-            import_texture_rgba32(tile);
-        } else {
-            gfx_import_unsupported(tile);
-        }
-    } else if (fmt == G_IM_FMT_IA) {
-        if (siz == G_IM_SIZ_4b) {
-            import_texture_ia4(tile);
-        } else if (siz == G_IM_SIZ_8b) {
-            import_texture_ia8(tile);
-        } else if (siz == G_IM_SIZ_16b) {
-            import_texture_ia16(tile);
-        } else {
-            gfx_import_unsupported(tile);
-        }
-    } else if (fmt == G_IM_FMT_CI) {
-        if (siz == G_IM_SIZ_4b) {
-            import_texture_ci4(tile);
-        } else if (siz == G_IM_SIZ_8b) {
-            import_texture_ci8(tile);
-        } else {
-            gfx_import_unsupported(tile);
-        }
-    } else if (fmt == G_IM_FMT_I) {
-        if (siz == G_IM_SIZ_4b) {
-            import_texture_i4(tile);
-        } else if (siz == G_IM_SIZ_8b) {
-            import_texture_i8(tile);
-        } else {
-            gfx_import_unsupported(tile);
-        }
-    } else {
-        gfx_import_unsupported(tile);
-    }
-    int t1 = get_time();
-    //printf("Time diff: %d\n", t1 - t0);
+    gfx_rapi->upload_texture(rgba, w, h);
 }
 
 static void gfx_normalize_vector(float v[3]) {
@@ -903,20 +772,25 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
                 import_texture(i);
                 rdp.textures_changed[i] = false;
             }
+            const struct TileDesc *st = &rdp.tiles[(tex_level + i) & 7];
             bool linear_filter = (rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT;
-            if (linear_filter != rendering_state.textures[i]->linear_filter || rdp.texture_tile.cms != rendering_state.textures[i]->cms || rdp.texture_tile.cmt != rendering_state.textures[i]->cmt) {
+            if (linear_filter != rendering_state.textures[i]->linear_filter || st->cms != rendering_state.textures[i]->cms || st->cmt != rendering_state.textures[i]->cmt) {
                 gfx_flush();
-                gfx_rapi->set_sampler_parameters(i, linear_filter, rdp.texture_tile.cms, rdp.texture_tile.cmt);
+                gfx_rapi->set_sampler_parameters(i, linear_filter, st->cms, st->cmt);
                 rendering_state.textures[i]->linear_filter = linear_filter;
-                rendering_state.textures[i]->cms = rdp.texture_tile.cms;
-                rendering_state.textures[i]->cmt = rdp.texture_tile.cmt;
+                rendering_state.textures[i]->cms = st->cms;
+                rendering_state.textures[i]->cmt = st->cmt;
             }
         }
     }
     
     bool use_texture = used_textures[0] || used_textures[1];
-    uint32_t tex_width = (rdp.texture_tile.lrs - rdp.texture_tile.uls + 4) / 4;
-    uint32_t tex_height = (rdp.texture_tile.lrt - rdp.texture_tile.ult + 4) / 4;
+    // Texture coordinates are scaled by the first texture the shader uses (TEXEL1 shares them).
+    const struct TileDesc *prim_tile = &rdp.tiles[(tex_level + (used_textures[0] ? 0 : 1)) & 7];
+    uint32_t tex_x0, tex_y0, tex_width, tex_height;
+    tile_dims(prim_tile, &tex_x0, &tex_y0, &tex_width, &tex_height);
+    if (tex_width == 0) tex_width = 1;
+    if (tex_height == 0) tex_height = 1;
     
     bool z_is_from_0_to_1 = gfx_rapi->z_is_from_0_to_1();
     
@@ -931,8 +805,8 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
         buf_vbo[buf_vbo_len++] = w;
         
         if (use_texture) {
-            float u = (v_arr[i]->u - rdp.texture_tile.uls * 8) / 32.0f;
-            float v = (v_arr[i]->v - rdp.texture_tile.ult * 8) / 32.0f;
+            float u = (v_arr[i]->u - prim_tile->uls * 8) / 32.0f;
+            float v = (v_arr[i]->v - prim_tile->ult * 8) / 32.0f;
             if ((rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT) {
                 // Linear filter adds 0.5f to the coordinates
                 u += 0.5f;
@@ -1088,6 +962,11 @@ static void gfx_sp_moveword(uint8_t index, uint16_t offset, uint32_t data) {
 static void gfx_sp_texture(uint16_t sc, uint16_t tc, uint8_t level, uint8_t tile, uint8_t on) {
     rsp.texture_scaling_factor.s = sc;
     rsp.texture_scaling_factor.t = tc;
+    if (tex_level != (tile & 7)) {
+        tex_level = tile & 7;
+        rdp.textures_changed[0] = true;
+        rdp.textures_changed[1] = true;
+    }
 }
 
 static void gfx_dp_set_scissor(uint32_t mode, uint32_t ulx, uint32_t uly, uint32_t lrx, uint32_t lry) {
@@ -1105,107 +984,102 @@ static void gfx_dp_set_scissor(uint32_t mode, uint32_t ulx, uint32_t uly, uint32
 }
 
 static void gfx_dp_set_texture_image(uint32_t format, uint32_t size, uint32_t width, const void* addr) {
-    rdp.texture_to_load.addr = addr;
-    rdp.texture_to_load.siz = size;
+    rdp.timg.addr = addr;
+    rdp.timg.siz = size;
+    rdp.timg.width = width + 1; // the command holds width - 1
 }
 
 static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t tmem, uint8_t tile, uint32_t palette, uint32_t cmt, uint32_t maskt, uint32_t shiftt, uint32_t cms, uint32_t masks, uint32_t shifts) {
-    if (tile == G_TX_RENDERTILE) {
-        SUPPORT_CHECK(palette == 0); // palette should set upper 4 bits of color index in 4b mode
-        rdp.texture_tile.fmt = fmt;
-        rdp.texture_tile.siz = siz;
-        rdp.texture_tile.cms = cms;
-        rdp.texture_tile.cmt = cmt;
-        rdp.texture_tile.line_size_bytes = line * 8;
-        rdp.textures_changed[0] = true;
-        rdp.textures_changed[1] = true;
-    }
-    
-    if (tile == G_TX_LOADTILE) {
-        rdp.texture_to_load.tile_number = tmem / 256;
-    }
+    struct TileDesc *t = &rdp.tiles[tile & 7];
+    t->fmt = fmt;
+    t->siz = siz;
+    t->line = line;
+    t->tmem = tmem;
+    t->palette = palette;
+    t->cms = cms;
+    t->cmt = cmt;
+    t->masks = masks;
+    t->maskt = maskt;
+    rdp.textures_changed[0] = true;
+    rdp.textures_changed[1] = true;
 }
 
 static void gfx_dp_set_tile_size(uint8_t tile, uint16_t uls, uint16_t ult, uint16_t lrs, uint16_t lrt) {
-    if (tile == G_TX_RENDERTILE) {
-        rdp.texture_tile.uls = uls;
-        rdp.texture_tile.ult = ult;
-        rdp.texture_tile.lrs = lrs;
-        rdp.texture_tile.lrt = lrt;
-        rdp.textures_changed[0] = true;
-        rdp.textures_changed[1] = true;
-    }
+    struct TileDesc *t = &rdp.tiles[tile & 7];
+    t->uls = uls;
+    t->ult = ult;
+    t->lrs = lrs;
+    t->lrt = lrt;
+    rdp.textures_changed[0] = true;
+    rdp.textures_changed[1] = true;
 }
 
+// G_LOADTLUT: (count) 16-bit entries from the texture image into palette slots starting at the tile's TMEM word.
 static void gfx_dp_load_tlut(uint8_t tile, uint32_t high_index) {
-    SUPPORT_CHECK(tile == G_TX_LOADTILE);
-    SUPPORT_CHECK(rdp.texture_to_load.siz == G_IM_SIZ_16b);
-    gfx_snapshot_palette(high_index);
+    const struct TileDesc *t = &rdp.tiles[tile & 7];
+    if (rdp.timg.addr == NULL) {
+        return;
+    }
+    uint32_t entries = (high_index >> 2) + 1; // high_index is a 10.2 texel index
+    uint32_t slot = t->tmem >= 256 ? t->tmem - 256 : 0;
+    uint32_t src = (uint32_t)(rdp.timg.addr - g_rdram);
+    for (uint32_t i = 0; i < entries && slot + i < 256; i++) {
+        uint8_t b[2];
+        rdram_copy(b, src + i * 2, 2);
+        tlut[slot + i] = (uint16_t)(b[0] << 8 | b[1]);
+    }
+    tlut_hash = gfx_fnv1a(0xcbf29ce484222325ULL, (const uint8_t *)tlut, sizeof(tlut));
+    rdp.textures_changed[0] = true;
+    rdp.textures_changed[1] = true;
 }
 
+// G_LOADBLOCK: a linear run of texels into TMEM at the tile's address.
 static void gfx_dp_load_block(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t lrs, uint32_t dxt) {
-    if (tile == 1) return;
-    SUPPORT_CHECK(tile == G_TX_LOADTILE);
-    SUPPORT_CHECK(uls == 0);
-    SUPPORT_CHECK(ult == 0);
-    
-    // The lrs field rather seems to be number of pixels to load
-    uint32_t word_size_shift;
-    switch (rdp.texture_to_load.siz) {
-        case G_IM_SIZ_4b:
-            word_size_shift = 0; // Or -1? It's unused in SM64 anyway.
-            break;
-        case G_IM_SIZ_8b:
-            word_size_shift = 0;
-            break;
-        case G_IM_SIZ_16b:
-            word_size_shift = 1;
-            break;
-        case G_IM_SIZ_32b:
-            word_size_shift = 2;
-            break;
+    const struct TileDesc *t = &rdp.tiles[tile & 7];
+    if (rdp.timg.addr == NULL || lrs < uls) {
+        return;
     }
-    uint32_t size_bytes = (lrs + 1) << word_size_shift;
-    rdp.loaded_texture[rdp.texture_to_load.tile_number].size_bytes = size_bytes;
-    // Sizes over 4096 are clamped in gfx_snapshot_texture.
-    gfx_snapshot_texture(rdp.texture_to_load.tile_number);
-    
-    rdp.textures_changed[rdp.texture_to_load.tile_number] = true;
+    uint32_t bits = k_siz_bits[rdp.timg.siz];
+    uint32_t bytes = ((lrs - uls + 1) * bits + 7) / 8;
+    uint32_t src = (uint32_t)(rdp.timg.addr - g_rdram) + ((ult * rdp.timg.width + uls) * bits) / 8;
+    uint32_t dst = (uint32_t)t->tmem * 8;
+    if (dst >= sizeof(tmem)) {
+        return;
+    }
+    if (bytes > sizeof(tmem) - dst) {
+        bytes = sizeof(tmem) - dst;
+    }
+    rdram_copy(tmem + dst, src, bytes);
+    rdp.textures_changed[0] = true;
+    rdp.textures_changed[1] = true;
 }
 
+// G_LOADTILE: a rectangle of the texture image, row by row, at the load tile's line stride. It also sets that tile's size.
 static void gfx_dp_load_tile(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t lrs, uint32_t lrt) {
-    if (tile == 1) return;
-    SUPPORT_CHECK(tile == G_TX_LOADTILE);
-    SUPPORT_CHECK(uls == 0);
-    SUPPORT_CHECK(ult == 0);
-
-    uint32_t word_size_shift;
-    switch (rdp.texture_to_load.siz) {
-        case G_IM_SIZ_4b:
-            word_size_shift = 0;
-            break;
-        case G_IM_SIZ_8b:
-            word_size_shift = 0;
-            break;
-        case G_IM_SIZ_16b:
-            word_size_shift = 1;
-            break;
-        case G_IM_SIZ_32b:
-            word_size_shift = 2;
-            break;
+    struct TileDesc *t = &rdp.tiles[tile & 7];
+    t->uls = uls;
+    t->ult = ult;
+    t->lrs = lrs;
+    t->lrt = lrt;
+    if (rdp.timg.addr == NULL || lrs < uls || lrt < ult) {
+        return;
     }
-
-    uint32_t size_bytes = (((lrs >> G_TEXTURE_IMAGE_FRAC) + 1) * ((lrt >> G_TEXTURE_IMAGE_FRAC) + 1)) << word_size_shift;
-    rdp.loaded_texture[rdp.texture_to_load.tile_number].size_bytes = size_bytes;
-
-    // Sizes over 4096 are clamped in gfx_snapshot_texture.
-    gfx_snapshot_texture(rdp.texture_to_load.tile_number);
-    rdp.texture_tile.uls = uls;
-    rdp.texture_tile.ult = ult;
-    rdp.texture_tile.lrs = lrs;
-    rdp.texture_tile.lrt = lrt;
-
-    rdp.textures_changed[rdp.texture_to_load.tile_number] = true;
+    uint32_t bits = k_siz_bits[rdp.timg.siz];
+    uint32_t w = ((lrs - uls) >> 2) + 1;
+    uint32_t h = ((lrt - ult) >> 2) + 1;
+    uint32_t src_stride = (rdp.timg.width * bits + 7) / 8;
+    uint32_t row_bytes = (w * bits + 7) / 8;
+    uint32_t dst_stride = tile_stride(t) != 0 ? tile_stride(t) : row_bytes;
+    uint32_t src = (uint32_t)(rdp.timg.addr - g_rdram) + (ult >> 2) * src_stride + ((uls >> 2) * bits) / 8;
+    for (uint32_t r = 0; r < h; r++) {
+        uint32_t dst = (uint32_t)t->tmem * 8 + r * dst_stride;
+        if (dst + row_bytes > sizeof(tmem)) {
+            break;
+        }
+        rdram_copy(tmem + dst, src + r * src_stride, row_bytes);
+    }
+    rdp.textures_changed[0] = true;
+    rdp.textures_changed[1] = true;
 }
 
 

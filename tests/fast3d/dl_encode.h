@@ -61,4 +61,22 @@ static inline void g_settile(uint32_t fmt, uint32_t siz, uint32_t line, uint32_t
 }
 static inline void g_loadblock(uint32_t tile, uint32_t lrs) { cmd(0xF3000000u, (tile << 24) | (lrs << 12)); }
 static inline void g_settilesize(uint32_t tile, uint32_t w, uint32_t h) { cmd(0xF2000000u, (tile << 24) | (((w - 1) << 2) << 12) | ((h - 1) << 2)); }
+// SETTILE with every field: palette, clamp/mirror (cm: bit0 mirror, bit1 clamp) and mask (log2 wrap) for each axis.
+static inline void g_settile_full(uint32_t fmt, uint32_t siz, uint32_t line, uint32_t tmem, uint32_t tile, uint32_t palette,
+                                  uint32_t cmt, uint32_t maskt, uint32_t cms, uint32_t masks) {
+    cmd(0xF5000000u | (fmt << 21) | (siz << 19) | (line << 9) | tmem,
+        (tile << 24) | (palette << 20) | (cmt << 18) | (maskt << 14) | (cms << 8) | (masks << 4));
+}
+// SETTILESIZE for the window (x, y) of size w x h texels.
+static inline void g_settilesize_at(uint32_t tile, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+    cmd(0xF2000000u | ((x << 2) << 12) | (y << 2), (tile << 24) | ((((x + w - 1) << 2)) << 12) | ((y + h - 1) << 2));
+}
+// LOADTILE of the rectangle (x, y) .. (x + w - 1, y + h - 1) of the texture image.
+static inline void g_loadtile(uint32_t tile, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+    cmd(0xF4000000u | ((x << 2) << 12) | (y << 2), (tile << 24) | (((x + w - 1) << 2) << 12) | ((y + h - 1) << 2));
+}
+// LOADTLUT of `count` 16-bit palette entries.
+static inline void g_loadtlut(uint32_t tile, uint32_t count) { cmd(0xF0000000u, (tile << 24) | (((count - 1) << 2) << 14)); }
+// G_TEXTURE with the tile TEXEL0 reads.
+static inline void g_texture_tile(uint32_t s, uint32_t t, uint32_t tile) { cmd(0xD7000000u | (tile << 8) | (1u << 1), (s << 16) | t); }
 static inline void g_texture(uint32_t s, uint32_t t) { cmd(0xD7000000u | (1u << 1), (s << 16) | t); }

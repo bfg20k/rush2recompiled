@@ -5,6 +5,7 @@
 // that records every draw and texture upload. Run it after touching lib/fast3d:
 //     cmake -S lib/fast3d -B tmp/fast3d && cmake --build tmp/fast3d && ctest --test-dir tmp/fast3d
 // (see docs/fast3d_port_plan.md)
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -221,6 +222,275 @@ static void test_texture_decode_and_cache() {
     CHECK(g_uploads.size() == 2, "changed texture bytes were not re-uploaded (%zu uploads)", g_uploads.size());
 }
 
+// ---- the TMEM model ---------------------------------------------------------------------------------------------------
+
+// Draws one textured triangle after `setup` has emitted the loads and tile state, and returns the texture uploads.
+template <typename F>
+static std::vector<Upload> draw_with_texture(F setup, uint32_t level = 0) {
+    reset_capture();
+    const uint32_t MTX = 0x1000, VTX = 0x1100, DL = 0x2000;
+    put_matrix_identity(MTX);
+    put_vtx(VTX + 0, -1, -1, 0, 0, 0, 255, 255, 255, 255);
+    put_vtx(VTX + 16, 1, -1, 0, 128, 0, 255, 255, 255, 255);
+    put_vtx(VTX + 32, 0, 1, 0, 0, 128, 255, 255, 255, 255);
+    dl_begin(DL);
+    common_setup(MTX);
+    g_combine_tex_shade();
+    setup();
+    g_texture_tile(0xFFFF, 0xFFFF, level);
+    g_vertex(VTX, 3, 0);
+    g_tri1(0, 1, 2);
+    g_enddl();
+    gfx_begin_frame();
+    gfx_run_task(DL);
+    gfx_end_frame();
+    return g_uploads;
+}
+
+static void put_bytes(uint32_t addr, const std::vector<uint8_t> &bytes) {
+    for (size_t i = 0; i < bytes.size(); i++) b8(addr + (uint32_t)i, bytes[i]);
+}
+
+static bool upload_is(const std::vector<Upload> &ups, size_t index, int w, int h, const std::vector<uint8_t> &rgba, const char *what) {
+    if (ups.size() <= index) {
+        std::printf("FAIL %s: only %zu uploads\n", what, ups.size());
+        g_failures++;
+        return false;
+    }
+    const Upload &u = ups[index];
+    if (u.width != w || u.height != h) {
+        std::printf("FAIL %s: size %dx%d, expected %dx%d\n", what, u.width, u.height, w, h);
+        g_failures++;
+        return false;
+    }
+    if (u.rgba != rgba) {
+        std::printf("FAIL %s: texels differ, got", what);
+        for (size_t i = 0; i < u.rgba.size() && i < 32; i++) std::printf(" %u", u.rgba[i]);
+        std::printf("\n");
+        g_failures++;
+        return false;
+    }
+    return true;
+}
+
+// Expected RGBA for a list of intensities (I8) or (intensity, alpha) pairs.
+static std::vector<uint8_t> expand_i(const std::vector<uint8_t> &v) {
+    std::vector<uint8_t> out;
+    for (uint8_t i : v) out.insert(out.end(), {i, i, i, i});
+    return out;
+}
+
+// Note on sizes: a row is padded to a multiple of 8 bytes in TMEM (the tile line is in 64-bit words), so these textures
+// use 8-byte rows, which is what a real texture loaded as a block has.
+static void test_tmem_formats() {
+    const uint32_t TEX = 0x3000;
+    // I8 8x2, loaded as a block of 16-bit units (how the libultra macros load 8-bit data).
+    std::vector<uint8_t> i8;
+    for (int i = 0; i < 16; i++) i8.push_back((uint8_t)(i * 17));
+    put_bytes(TEX, i8);
+    auto ups = draw_with_texture([&] {
+        g_settimg(4, 2, 8, TEX);
+        g_settile(4, 2, 0, 0, 7);
+        g_loadblock(7, 7);
+        g_settile(4, 1, 1, 0, 0);
+        g_settilesize(0, 8, 2);
+    });
+    upload_is(ups, 0, 8, 2, expand_i(i8), "I8 8x2");
+
+    // IA8: intensity high nibble, alpha low nibble, each x17.
+    put_bytes(TEX, {0xF0, 0x0F, 0x84, 0xFF, 0x12, 0x34, 0x56, 0x78, 0, 0, 0, 0, 0, 0, 0, 0});
+    ups = draw_with_texture([&] {
+        g_settimg(3, 2, 8, TEX);
+        g_settile(3, 2, 0, 0, 7);
+        g_loadblock(7, 7);
+        g_settile(3, 1, 1, 0, 0);
+        g_settilesize(0, 8, 2);
+    });
+    CHECK(ups.size() == 1 && ups[0].width == 8 && ups[0].height == 2, "IA8 size");
+    if (ups.size() == 1 && ups[0].rgba.size() == 64) {
+        const std::vector<uint8_t> first = {255, 255, 255, 0, 0, 0, 0, 255, 136, 136, 136, 68, 255, 255, 255, 255,
+                                            17, 17, 17, 34, 51, 51, 51, 68, 85, 85, 85, 102, 119, 119, 119, 136};
+        CHECK(std::equal(first.begin(), first.end(), ups[0].rgba.begin()), "IA8 first row");
+        CHECK(ups[0].rgba[32 + 3] == 0, "IA8 second row is the zero bytes");
+    }
+
+    // IA16 4x2: intensity byte then alpha byte, 8-byte rows.
+    put_bytes(TEX, {10, 200, 20, 100, 30, 50, 40, 0, 1, 2, 3, 4, 5, 6, 7, 8});
+    ups = draw_with_texture([&] {
+        g_settimg(3, 2, 4, TEX);
+        g_settile(3, 2, 0, 0, 7);
+        g_loadblock(7, 7);
+        g_settile(3, 2, 1, 0, 0);
+        g_settilesize(0, 4, 2);
+    });
+    upload_is(ups, 0, 4, 2, {10, 10, 10, 200, 20, 20, 20, 100, 30, 30, 30, 50, 40, 40, 40, 0, 1, 1, 1, 2, 3, 3, 3, 4, 5, 5, 5, 6, 7, 7, 7, 8},
+              "IA16 4x2");
+
+    // I4 16x1 and IA4 16x1: two texels per byte, high nibble first.
+    put_bytes(TEX, {0x0F, 0x84, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60});
+    ups = draw_with_texture([&] {
+        g_settimg(4, 2, 16, TEX);
+        g_settile(4, 2, 0, 0, 7);
+        g_loadblock(7, 3);
+        g_settile(4, 0, 1, 0, 0);
+        g_settilesize(0, 16, 1);
+    });
+    CHECK(ups.size() == 1 && ups[0].width == 16 && ups[0].height == 1, "I4 size");
+    if (ups.size() == 1 && ups[0].rgba.size() == 64) {
+        const std::vector<uint8_t> first = {0, 0, 0, 0, 255, 255, 255, 255, 136, 136, 136, 136, 68, 68, 68, 68};
+        CHECK(std::equal(first.begin(), first.end(), ups[0].rgba.begin()), "I4 first texels");
+    }
+    put_bytes(TEX, {0xF1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}); // 15 = intensity 7 alpha 1, then 1 = intensity 0 alpha 1
+    ups = draw_with_texture([&] {
+        g_settimg(3, 2, 16, TEX);
+        g_settile(3, 2, 0, 0, 7);
+        g_loadblock(7, 3);
+        g_settile(3, 0, 1, 0, 0);
+        g_settilesize(0, 16, 1);
+    });
+    CHECK(ups.size() == 1 && ups[0].width == 16, "IA4 size");
+    if (ups.size() == 1 && ups[0].rgba.size() == 64) {
+        const std::vector<uint8_t> first = {252, 252, 252, 255, 0, 0, 0, 255, 0, 0, 0, 0};
+        CHECK(std::equal(first.begin(), first.end(), ups[0].rgba.begin()), "IA4 first texels");
+    }
+
+    // RGBA32 4x2: R G B A bytes per texel, 16 bytes per row.
+    std::vector<uint8_t> rgba32;
+    for (int i = 0; i < 32; i++) rgba32.push_back((uint8_t)(i * 7 + 3));
+    put_bytes(TEX, rgba32);
+    ups = draw_with_texture([&] {
+        g_settimg(0, 3, 4, TEX);
+        g_settile(0, 3, 0, 0, 7);
+        g_loadblock(7, 7);
+        g_settile(0, 3, 1, 0, 0);
+        g_settilesize(0, 4, 2);
+    });
+    upload_is(ups, 0, 4, 2, rgba32, "RGBA32 4x2");
+}
+
+static void test_tmem_palettes() {
+    const uint32_t TEX = 0x3000, PAL = 0x3400;
+    // Palette: entry i = 5-bit red i, alpha 1.
+    for (int i = 0; i < 32; i++) h16(PAL + i * 2, (uint16_t)((i << 11) | 1));
+    auto red = [](int r) { return (uint8_t)(r * 255 / 31); };
+    // CI8 8x2: indices into the palette at TMEM word 256.
+    std::vector<uint8_t> idx = {0, 1, 2, 3, 31, 30, 29, 28, 4, 5, 6, 7, 8, 9, 10, 11};
+    put_bytes(TEX, idx);
+    auto ups = draw_with_texture([&] {
+        g_settimg(0, 2, 32, PAL);
+        g_settile(0, 2, 0, 256, 7);
+        g_loadtlut(7, 32);
+        g_settimg(2, 2, 8, TEX);
+        g_settile(2, 2, 0, 0, 7);
+        g_loadblock(7, 7);
+        g_settile(2, 1, 1, 0, 0);
+        g_settilesize(0, 8, 2);
+    });
+    std::vector<uint8_t> expect;
+    for (uint8_t i : idx) expect.insert(expect.end(), {red(i), 0, 0, 255});
+    upload_is(ups, 0, 8, 2, expect, "CI8 8x2");
+
+    // CI4 16x1 using palette 1 (palette slots 16..31): the nibble indexes within that palette.
+    put_bytes(TEX, {0x01, 0x23, 0xF0, 0x12, 0x00, 0x00, 0x00, 0x00});
+    ups = draw_with_texture([&] {
+        g_settimg(0, 2, 32, PAL);
+        g_settile(0, 2, 0, 256, 7);
+        g_loadtlut(7, 32);
+        g_settimg(2, 2, 16, TEX);
+        g_settile(2, 2, 0, 0, 7);
+        g_loadblock(7, 3);
+        g_settile_full(2, 0, 1, 0, 0, 1, 0, 0, 0, 0);
+        g_settilesize(0, 16, 1);
+    });
+    expect.clear();
+    for (int nib : {0, 1, 2, 3, 15, 0, 1, 2}) expect.insert(expect.end(), {red(16 + nib), 0, 0, 255});
+    CHECK(ups.size() == 1 && ups[0].width == 16 && ups[0].rgba.size() >= 32 && std::equal(expect.begin(), expect.end(), ups[0].rgba.begin()),
+          "CI4 palette 1 (size %d)", ups.empty() ? 0 : ups[0].width);
+
+    // A second palette load does not disturb the first one's textures (cache key includes the palette).
+    for (int i = 0; i < 32; i++) h16(PAL + i * 2, (uint16_t)(((31 - i) << 11) | 1));
+    put_bytes(TEX, idx);
+    ups = draw_with_texture([&] {
+        g_settimg(0, 2, 32, PAL);
+        g_settile(0, 2, 0, 256, 7);
+        g_loadtlut(7, 32);
+        g_settimg(2, 2, 8, TEX);
+        g_settile(2, 2, 0, 0, 7);
+        g_loadblock(7, 7);
+        g_settile(2, 1, 1, 0, 0);
+        g_settilesize(0, 8, 2);
+    });
+    CHECK(ups.size() == 1 && ups[0].rgba[0] == red(31), "a changed palette re-uploads the CI texture (got %u)", ups.empty() ? 0 : ups[0].rgba[0]);
+}
+
+static void test_tmem_tiles_and_sizes() {
+    const uint32_t TEX = 0x3000;
+    // Two textures resident at once at different TMEM addresses; G_TEXTURE's tile picks which one a draw samples.
+    std::vector<uint8_t> a, b;
+    for (int i = 0; i < 16; i++) {
+        a.push_back((uint8_t)(i + 1));
+        b.push_back((uint8_t)(101 + i));
+    }
+    put_bytes(TEX, a);
+    put_bytes(TEX + 0x100, b);
+    auto setup_two = [&] {
+        g_settimg(4, 2, 8, TEX);
+        g_settile(4, 2, 0, 0, 7);
+        g_loadblock(7, 7);
+        g_settimg(4, 2, 8, TEX + 0x100);
+        g_settile(4, 2, 0, 64, 7);
+        g_loadblock(7, 7);
+        g_settile(4, 1, 1, 0, 0);
+        g_settilesize(0, 8, 2);
+        g_settile(4, 1, 1, 64, 1);
+        g_settilesize(1, 8, 2);
+    };
+    auto ups = draw_with_texture(setup_two, 0);
+    upload_is(ups, 0, 8, 2, expand_i(a), "tile 0 (first texture)");
+    ups = draw_with_texture(setup_two, 1);
+    upload_is(ups, 0, 8, 2, expand_i(b), "tile 1 (second texture, still resident)");
+
+    // G_LOADTILE of a sub-rectangle: an 8x4 I8 image, the 4x2 window at (2, 1).
+    std::vector<uint8_t> image;
+    for (int i = 0; i < 32; i++) image.push_back((uint8_t)(i + 1));
+    put_bytes(TEX, image);
+    ups = draw_with_texture([&] {
+        g_settimg(4, 1, 8, TEX);
+        g_settile(4, 1, 1, 0, 7);
+        g_loadtile(7, 2, 1, 4, 2);
+        g_settile(4, 1, 1, 0, 0);
+        g_settilesize(0, 4, 2);
+    });
+    // Row 1 of the image is 9..16, row 2 is 17..24; the window starts at column 2.
+    upload_is(ups, 0, 4, 2, expand_i({11, 12, 13, 14, 19, 20, 21, 22}), "LOADTILE sub-rectangle");
+
+    // The size comes from SETTILESIZE, not from the line: a 16-texel line with a 6x2 window.
+    ups = draw_with_texture([&] {
+        g_settimg(4, 1, 16, TEX);
+        g_settile(4, 1, 2, 0, 7);
+        g_loadtile(7, 0, 0, 16, 2);
+        g_settile(4, 1, 2, 0, 0);
+        g_settilesize(0, 6, 2);
+    });
+    CHECK(ups.size() == 1 && ups[0].width == 6 && ups[0].height == 2, "window 6x2 got %dx%d", ups.empty() ? 0 : ups[0].width,
+          ups.empty() ? 0 : ups[0].height);
+
+    // A mask makes the repeat period the texture size even when the tile window is wider.
+    ups = draw_with_texture([&] {
+        g_settimg(4, 1, 16, TEX);
+        g_settile(4, 1, 2, 0, 7);
+        g_loadtile(7, 0, 0, 16, 2);
+        g_settile_full(4, 1, 2, 0, 0, 0, 0, 1, 0, 3); // wrap 8 texels across, 2 down
+        g_settilesize(0, 16, 2);
+    });
+    CHECK(ups.size() == 1 && ups[0].width == 8 && ups[0].height == 2, "masked 8x2 got %dx%d", ups.empty() ? 0 : ups[0].width,
+          ups.empty() ? 0 : ups[0].height);
+
+    // A tile that was never set up is a placeholder, not a crash.
+    ups = draw_with_texture([&] { g_settile(4, 1, 0, 0, 0); });
+    CHECK(ups.size() == 1 && ups[0].width == 2 && ups[0].height == 2, "unset tile placeholder");
+}
+
 static void test_malformed_lists() {
     reset_capture();
     const uint32_t MTX = 0x1000, DL = 0x2000, LOOP = 0x4000, RECURSE = 0x5000;
@@ -253,6 +523,9 @@ int main() {
     test_vertices_and_matrices();
     test_segments_and_nested_dl();
     test_texture_decode_and_cache();
+    test_tmem_formats();
+    test_tmem_palettes();
+    test_tmem_tiles_and_sizes();
     test_malformed_lists();
 
     std::free(rdram);
