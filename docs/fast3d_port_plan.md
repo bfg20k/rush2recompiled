@@ -178,3 +178,19 @@ Upstream Fast3D's `LICENSE.txt` (kept in `lib/fast3d`) is a custom BSD-style tex
 redistribution except for binaries that contain no assets you do not have the right to distribute. A recompiled Rush 2
 build contains no game assets (it reads the user's ROM at run time), but check that clause before shipping binaries.
 Project-Midas ships a copy of Fast3D under an MIT license; that is a different, GoldenEye-specific fork and is not used here.
+
+## Bring-up fixes after the first in-game run
+
+First screenshots showed black/speckled ground, white cars, magenta noise on billboards. Causes found offline:
+
+- **LOADTLUT count**: bits 14..23 of word 1 hold `count - 1` as a plain integer (gDPLoadTLUT_pal16 = 15, pal256 = 255).
+  The core shifted it down by 2 again, so only a quarter of every palette loaded. The test encoder had the same
+  mistake, which is why the tests passed. Both fixed; tests now use real macro encodings.
+- **Direct heap pointers**: the recompiled heap starts at 0x01000000, above what a 24-bit segment offset reaches.
+  `seg_addr` read `0x81xxxxxx` as segment 1 + offset, returning unrelated low memory. Addresses with bit 31 set are now
+  physical (`& 0x1FFFFFFF`); the old 64 MB mask became 512 MB.
+- **Lights**: `MAX_LIGHTS` was 2 (SM64); F3DEX2 allows 7. With 3+ lights the ambient colour was read out of bounds
+  (white cars). Count is clamped, and G_MOVEMEM of a light now recomputes direction coefficients.
+- G_SETTIMG width is 12 bits (was 10). `tile_dims` applies the mask after the no-size fallback.
+- stderr lines prefixed `[fast3d]` list each distinct combiner/render mode and any unsupported texture, once each.
+  Still open: only cycle 0 of the combiner is used (2-cycle modes); check the `cycle=` field in those lines.

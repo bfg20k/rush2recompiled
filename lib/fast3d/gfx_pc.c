@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <assert.h>
 
 // Rush 2 recomp: embedded Fast3D core. Adapted from Emill/n64-fast3d-engine (see docs/fast3d_port_plan.md): display lists,
@@ -33,7 +34,7 @@
 #define RATIO_Y (gfx_current_dimensions.height / (2.0f * HALF_SCREEN_HEIGHT))
 
 #define MAX_BUFFERED 256
-#define MAX_LIGHTS 2
+#define MAX_LIGHTS 7 // F3DEX2 takes up to 7 directional lights plus the ambient one (SM64's 2 is far too few here)
 #define MAX_VERTICES 64
 
 struct RGBA {
@@ -296,6 +297,25 @@ static uint64_t gfx_fnv1a(uint64_t h, const uint8_t *data, size_t n) {
     return h;
 }
 
+// Diagnostics for bring-up: each distinct line is printed once to stderr, at most F3D_LOG_MAX lines in all, so a log
+// shows exactly which combiners, render modes and texture setups the game uses without costing frame time.
+#define F3D_LOG_MAX 160
+static uint64_t f3d_log_seen[F3D_LOG_MAX];
+static int f3d_log_count;
+static void f3d_log_once(uint64_t key, const char *fmt, uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e, uint32_t f) {
+    key |= 1;
+    for (int i = 0; i < f3d_log_count; i++) {
+        if (f3d_log_seen[i] == key) {
+            return;
+        }
+    }
+    if (f3d_log_count >= F3D_LOG_MAX) {
+        return;
+    }
+    f3d_log_seen[f3d_log_count++] = key;
+    fprintf(stderr, fmt, a, b, c, d, e, f);
+}
+
 // A format or state the core cannot decode yet draws as a 2x2 magenta texture instead of aborting the game.
 static void gfx_import_unsupported(int tile) {
     static const uint8_t magenta[16] = {255, 0, 255, 255, 255, 0, 255, 255, 255, 0, 255, 255, 255, 0, 255, 255};
@@ -340,16 +360,16 @@ static void tile_dims(const struct TileDesc *t, uint32_t *x0, uint32_t *y0, uint
     if (ww == 0 || ww > max_w) {
         ww = max_w;
     }
+    uint32_t base = (uint32_t)t->tmem * 8;
+    uint32_t max_h = stride != 0 && base < sizeof(tmem) ? (uint32_t)(sizeof(tmem) - base) / stride : 0;
+    if (hh == 0 || hh > max_h) {
+        hh = max_h; // before the masks, so a tile with no size still repeats at its mask
+    }
     if (t->masks != 0 && (1u << t->masks) < ww) {
         ww = 1u << t->masks;
     }
     if (t->maskt != 0 && (1u << t->maskt) < hh) {
         hh = 1u << t->maskt;
-    }
-    uint32_t base = (uint32_t)t->tmem * 8;
-    uint32_t max_h = stride != 0 && base < sizeof(tmem) ? (uint32_t)(sizeof(tmem) - base) / stride : 0;
-    if (hh == 0 || hh > max_h) {
-        hh = max_h;
     }
     *x0 = t->uls >> 2;
     *y0 = t->ult >> 2;
@@ -394,6 +414,8 @@ static void import_texture(int slot) {
     uint32_t stride = tile_stride(t);
 
     if (w == 0 || h == 0 || w * h > 8192 || stride == 0) {
+        f3d_log_once(0x1000000000ULL ^ ((uint64_t)t->fmt << 40) ^ ((uint64_t)t->siz << 36) ^ ((uint64_t)t->line << 20) ^ (w << 10) ^ h,
+                     "[fast3d] unsupported texture: fmt=%u siz=%u line=%u tmem=%u size=%ux%u\n", t->fmt, t->siz, t->line, t->tmem, w, h);
         gfx_import_unsupported(slot); // a tile that was never set up
         return;
     }
@@ -729,6 +751,9 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     }
     
     uint32_t cc_id = rdp.combine_mode;
+    f3d_log_once(((uint64_t)rdp.combine_mode << 32) ^ rdp.other_mode_l ^ ((uint64_t)rdp.other_mode_h << 7) ^ ((uint64_t)rsp.geometry_mode << 13),
+                 "[fast3d] draw: combine(c0 rgb/alpha)=%06x cycle=%u omL=%08x omH=%08x geom=%08x lights=%u\n",
+                 rdp.combine_mode, (rdp.other_mode_h >> G_MDSFT_CYCLETYPE) & 3, rdp.other_mode_l, rdp.other_mode_h, rsp.geometry_mode, rsp.current_num_lights);
     
     bool use_alpha = (rdp.other_mode_l & (G_BL_A_MEM << 18)) == 0;
     bool use_fog = (rdp.other_mode_l >> 30) == G_BL_CLR_FOG;
@@ -923,6 +948,7 @@ static void gfx_sp_movemem(uint8_t index, uint8_t offset, const void* data) {
             if (lightidx >= 0 && lightidx <= MAX_LIGHTS) { // skip lookat
                 // NOTE: reads out of bounds if it is an ambient light
                 f3d_read_light(g_rdram, (uint32_t)((const uint8_t *)data - g_rdram), rsp.current_lights + lightidx);
+                rsp.lights_changed = 1; // a light reloaded alone (no new G_NUMLIGHT) still needs its direction redone
             }
             break;
         }
@@ -942,6 +968,9 @@ static void gfx_sp_moveword(uint8_t index, uint16_t offset, uint32_t data) {
         case G_MW_NUMLIGHT:
 #ifdef F3DEX_GBI_2
             rsp.current_num_lights = data / 24 + 1; // add ambient light
+            if (rsp.current_num_lights > MAX_LIGHTS + 1) {
+                rsp.current_num_lights = MAX_LIGHTS + 1; // a corrupt count must not index past the light arrays
+            }
 #else
             // Ambient light is included
             // The 31th bit is a flag that lights should be recalculated
@@ -950,7 +979,7 @@ static void gfx_sp_moveword(uint8_t index, uint16_t offset, uint32_t data) {
             rsp.lights_changed = 1;
             break;
         case G_MW_SEGMENT:
-            g_segments[(offset >> 2) & 15] = data & 0x3FFFFFF;
+            g_segments[(offset >> 2) & 15] = data & 0x1FFFFFFF; // KSEG0 pointer or physical
             break;
         case G_MW_FOG:
             rsp.fog_mul = (int16_t)(data >> 16);
@@ -1015,12 +1044,15 @@ static void gfx_dp_set_tile_size(uint8_t tile, uint16_t uls, uint16_t ult, uint1
 }
 
 // G_LOADTLUT: (count) 16-bit entries from the texture image into palette slots starting at the tile's TMEM word.
-static void gfx_dp_load_tlut(uint8_t tile, uint32_t high_index) {
+// `count_minus_1` is bits 14..23 of word 1, which the gDPLoadTLUT macros fill with (count - 1) as a plain integer
+// (15 for pal16, 255 for pal256). The hardware reads the same bits as the high 8 bits of a 10.2 coordinate, so it is
+// NOT shifted down again here; doing so loaded a quarter of every palette.
+static void gfx_dp_load_tlut(uint8_t tile, uint32_t count_minus_1) {
     const struct TileDesc *t = &rdp.tiles[tile & 7];
     if (rdp.timg.addr == NULL) {
         return;
     }
-    uint32_t entries = (high_index >> 2) + 1; // high_index is a 10.2 texel index
+    uint32_t entries = count_minus_1 + 1;
     uint32_t slot = t->tmem >= 256 ? t->tmem - 256 : 0;
     uint32_t src = (uint32_t)(rdp.timg.addr - g_rdram);
     for (uint32_t i = 0; i < entries && slot + i < 256; i++) {
@@ -1308,11 +1340,18 @@ static void gfx_sp_set_other_mode(uint32_t shift, uint32_t num_bits, uint64_t mo
     rdp.other_mode_h = (uint32_t)(om >> 32);
 }
 
-// Resolves a segmented address (segment number in bits 24-27) to a host pointer into RDRAM, masked to 64 MB like RT64.
+// Resolves a display list address to a host pointer into RDRAM. A KSEG0/KSEG1 pointer (bit 31 set, e.g. 0x81234567) is a
+// direct physical address: the recompiled game's heap lives above 16 MB (0x01000000..0x1FFFFFFF), which the 24-bit
+// segment offset cannot reach, and reading such a pointer as "segment 1, offset 0x234567" returned unrelated low memory
+// (noise textures, wrong vertices). Anything else is segment number (bits 24-27) + 24-bit offset. Masked to 512 MB.
+#define F3D_PHYS_MASK 0x1FFFFFFFu
 static inline void *seg_addr(uintptr_t w1) {
-    uint32_t seg = ((uint32_t)w1 >> 24) & 0x0F;
-    uint32_t phys = (g_segments[seg] + ((uint32_t)w1 & 0x00FFFFFF)) & 0x3FFFFFF;
-    return g_rdram + phys;
+    uint32_t a = (uint32_t)w1;
+    if (a & 0x80000000u) {
+        return g_rdram + (a & F3D_PHYS_MASK);
+    }
+    uint32_t seg = (a >> 24) & 0x0F;
+    return g_rdram + ((g_segments[seg] + (a & 0x00FFFFFFu)) & F3D_PHYS_MASK);
 }
 
 #define DL_MAX_DEPTH 18 // the RSP's display list stack depth
@@ -1443,7 +1482,7 @@ static void gfx_run_dl(Gfx* cmd) {
             
             // RDP Commands:
             case G_SETTIMG:
-                gfx_dp_set_texture_image(C0(21, 3), C0(19, 2), C0(0, 10), seg_addr(cmd->words.w1));
+                gfx_dp_set_texture_image(C0(21, 3), C0(19, 2), C0(0, 12), seg_addr(cmd->words.w1)); // width - 1 is 12 bits
                 break;
             case G_LOADBLOCK:
                 gfx_dp_load_block(C1(24, 3), C0(12, 12), C0(0, 12), C1(12, 12), C1(0, 12));
@@ -1577,7 +1616,7 @@ void gfx_run_task(uint32_t dl_addr) {
     memset(g_segments, 0, sizeof(g_segments));
     dl_depth = 0;
     dl_cmd_budget = 16u * 1024u * 1024u;
-    gfx_run_dl((Gfx *)(g_rdram + (dl_addr & 0x3FFFFFF)));
+    gfx_run_dl((Gfx *)(g_rdram + (dl_addr & 0x1FFFFFFF)));
     gfx_flush();
 }
 

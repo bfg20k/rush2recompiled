@@ -162,6 +162,26 @@ static void test_segments_and_nested_dl() {
     CHECK(tris == 4, "TRI2 (2) + QUAD (2) via segment 6 gave %zu triangles", tris);
 }
 
+// The recompiled heap sits above 16 MB: a direct 0x81xxxxxx pointer must reach it, not wrap into segment 1.
+static void test_direct_heap_pointers() {
+    reset_capture();
+    const uint32_t MTX = 0x1000, DL = 0x2000, HEAP = 0x01800000;
+    put_matrix_identity(MTX);
+    put_vtx(HEAP + 0, -1, -1, 0, 0, 0, 255, 0, 0, 255);
+    put_vtx(HEAP + 16, 1, -1, 0, 0, 0, 0, 255, 0, 255);
+    put_vtx(HEAP + 32, 0, 1, 0, 0, 0, 0, 0, 255, 255);
+    dl_begin(DL);
+    common_setup(MTX);
+    g_vertex(0x80000000u | HEAP, 3, 0);
+    g_tri1(0, 1, 2);
+    g_enddl();
+    gfx_begin_frame();
+    gfx_run_task(DL);
+    gfx_end_frame();
+    CHECK(g_draws.size() == 1 && g_draws[0].vbo.size() == 24 && near(g_draws[0].vbo[0], -1) && near(g_draws[0].vbo[4], 1),
+          "vertices behind a 0x81800000 pointer (draws=%zu)", g_draws.size());
+}
+
 static uint16_t col16(int i) { return (uint16_t)((i << 11) | ((31 - i) << 6) | (((i * 2) % 32) << 1) | (i & 1)); }
 
 static void test_texture_decode_and_cache() {
@@ -421,6 +441,44 @@ static void test_tmem_palettes() {
         g_settilesize(0, 8, 2);
     });
     CHECK(ups.size() == 1 && ups[0].rgba[0] == red(31), "a changed palette re-uploads the CI texture (got %u)", ups.empty() ? 0 : ups[0].rgba[0]);
+
+    // Full-size palettes as the gDPLoadTLUT_pal16 / _pal256 macros load them: every entry must arrive, not a quarter
+    // of them (regression: the count field was shifted down by 2 twice, leaving CI textures black and speckled).
+    const uint32_t PAL256 = 0x4000;
+    for (int i = 0; i < 256; i++) h16(PAL256 + i * 2, (uint16_t)(((i % 31 + 1) << 11) | 1));
+    std::vector<uint8_t> hi = {255, 200, 100, 17, 64, 65, 66, 67};
+    put_bytes(TEX, hi);
+    ups = draw_with_texture([&] {
+        g_settimg(0, 2, 256, PAL256);
+        g_settile(0, 2, 0, 256, 7);
+        g_loadtlut(7, 256);
+        g_settimg(2, 2, 8, TEX);
+        g_settile(2, 2, 0, 0, 7);
+        g_loadblock(7, 7);
+        g_settile(2, 1, 1, 0, 0);
+        g_settilesize(0, 8, 1);
+    });
+    expect.clear();
+    for (uint8_t i : hi) expect.insert(expect.end(), {red(i % 31 + 1), 0, 0, 255});
+    upload_is(ups, 0, 8, 1, expect, "CI8 with a 256-entry palette");
+
+    // pal16: palette 0 of a CI4 texture, entries 4..15 included.
+    for (int i = 0; i < 16; i++) h16(PAL256 + i * 2, (uint16_t)(((i + 8) << 11) | 1));
+    put_bytes(TEX, {0x4B, 0xFE, 0x57, 0x9A, 0x00, 0x00, 0x00, 0x00});
+    ups = draw_with_texture([&] {
+        g_settimg(0, 2, 16, PAL256);
+        g_settile(0, 2, 0, 256, 7);
+        g_loadtlut(7, 16);
+        g_settimg(2, 2, 16, TEX);
+        g_settile(2, 2, 0, 0, 7);
+        g_loadblock(7, 3);
+        g_settile_full(2, 0, 1, 0, 0, 0, 0, 0, 0, 0);
+        g_settilesize(0, 16, 1);
+    });
+    expect.clear();
+    for (int nib : {4, 0xB, 0xF, 0xE, 5, 7, 9, 0xA}) expect.insert(expect.end(), {red(nib + 8), 0, 0, 255});
+    CHECK(ups.size() == 1 && ups[0].width == 16 && ups[0].rgba.size() >= 32 && std::equal(expect.begin(), expect.end(), ups[0].rgba.begin()),
+          "CI4 with a 16-entry palette (size %d)", ups.empty() ? 0 : ups[0].width);
 }
 
 static void test_tmem_tiles_and_sizes() {
@@ -516,12 +574,13 @@ static void test_malformed_lists() {
 }
 
 int main() {
-    rdram = (uint8_t *)std::calloc(1, 8 * 1024 * 1024);
+    rdram = (uint8_t *)std::calloc(1, 32 * 1024 * 1024);
     gfx_init_embedded(&g_api, rdram);
     gfx_set_dimensions(320, 240);
 
     test_vertices_and_matrices();
     test_segments_and_nested_dl();
+    test_direct_heap_pointers();
     test_texture_decode_and_cache();
     test_tmem_formats();
     test_tmem_palettes();

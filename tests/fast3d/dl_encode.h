@@ -76,7 +76,8 @@ static inline void g_loadtile(uint32_t tile, uint32_t x, uint32_t y, uint32_t w,
     cmd(0xF4000000u | ((x << 2) << 12) | (y << 2), (tile << 24) | (((x + w - 1) << 2) << 12) | ((y + h - 1) << 2));
 }
 // LOADTLUT of `count` 16-bit palette entries.
-static inline void g_loadtlut(uint32_t tile, uint32_t count) { cmd(0xF0000000u, (tile << 24) | (((count - 1) << 2) << 14)); }
+// The gDPLoadTLUT macros put (count - 1) at bits 14..23 as a plain integer (gbi.h: _SHIFTL(count, 14, 10)).
+static inline void g_loadtlut(uint32_t tile, uint32_t count) { cmd(0xF0000000u, (tile << 24) | ((count - 1) << 14)); }
 // G_TEXTURE with the tile TEXEL0 reads.
 static inline void g_texture_tile(uint32_t s, uint32_t t, uint32_t tile) { cmd(0xD7000000u | (tile << 8) | (1u << 1), (s << 16) | t); }
 static inline void g_texture(uint32_t s, uint32_t t) { cmd(0xD7000000u | (1u << 1), (s << 16) | t); }

@@ -127,7 +127,7 @@ public:
             return;
         }
         open_frame();
-        gfx_run_task(task->t.data_ptr & 0x3FFFFFF);
+        gfx_run_task(task->t.data_ptr & 0x1FFFFFFF);
     }
 
     void send_dummy_workload(uint32_t) override {
