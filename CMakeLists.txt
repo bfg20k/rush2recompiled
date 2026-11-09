@@ -341,8 +341,12 @@ target_include_directories(Rush2Recompiled PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}
 )
 
+# The x86-64 baseline the game's own code is compiled for. nehalem (SSE4.2, POPCNT) is the default; a CPU older than that
+# (Core 2, early Phenom) dies with SIGILL at the first instruction the compiler picked from the newer set. Configure with
+# -DRUSH2_MARCH=core2 or -DRUSH2_MARCH=x86-64 for those.
+set(RUSH2_MARCH "nehalem" CACHE STRING "-march for Rush2Recompiled's own code on x86-64")
 if (CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
-    target_compile_options(Rush2Recompiled PRIVATE -march=nehalem -fno-strict-aliasing -fms-extensions)
+    target_compile_options(Rush2Recompiled PRIVATE -march=${RUSH2_MARCH} -fno-strict-aliasing -fms-extensions)
 else()
     target_compile_options(Rush2Recompiled PRIVATE -fno-strict-aliasing -fms-extensions)
 endif()
