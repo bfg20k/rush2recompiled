@@ -1248,6 +1248,10 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
         ur->v = lrt;
     }
     
+    f3d_log_once(0x3000000000ULL ^ ((uint64_t)tile << 40) ^ rdp.other_mode_l ^ ((uint64_t)rdp.other_mode_h << 7) ^ (rdp.combine_mode * 0x9E3779B97F4A7C15ull),
+                 "[fast3d] texrect: tile=%u fmt=%u siz=%u cycle=%u omL=%08x omH=%08x combine=%07x\n", tile & 7, rdp.tiles[tile & 7].fmt,
+                 rdp.tiles[tile & 7].siz, (rdp.other_mode_h >> G_MDSFT_CYCLETYPE) & 3, rdp.other_mode_l, rdp.other_mode_h,
+                 (uint32_t)rdp.combine_mode & 0xFFFFFFF);
     // The rectangle names its own tile; G_TEXTURE (which triangles use) may have selected another one.
     const uint8_t saved_tex_level = tex_level;
     if ((tile & 7) != tex_level) {
@@ -1535,6 +1539,13 @@ static void gfx_run_dl(Gfx* cmd) {
                 gfx_dp_fill_rectangle(C1(12, 12), C1(0, 12), C0(12, 12), C0(0, 12));
                 break;
 #endif
+            case 0xEF: // G_RDPSETOTHERMODE: the whole other-mode pair at once (high word in w0's low 24 bits)
+                if (rdp.other_mode_h != C0(0, 24) || (rdp.other_mode_l != cmd->words.w1)) {
+                    rdp.textures_changed[0] = rdp.textures_changed[1] = true;
+                }
+                rdp.other_mode_h = C0(0, 24);
+                rdp.other_mode_l = cmd->words.w1;
+                break;
             case G_SETSCISSOR:
                 gfx_dp_set_scissor(C1(24, 2), C0(12, 12), C0(0, 12), C1(12, 12), C1(0, 12));
                 break;
@@ -1543,6 +1554,13 @@ static void gfx_run_dl(Gfx* cmd) {
                 break;
             case G_SETCIMG:
                 gfx_dp_set_color_image(C0(21, 3), C0(19, 2), C0(0, 11), seg_addr(cmd->words.w1));
+                break;
+            case 0xE0: case 0xE1: case 0xE6: case 0xE7: case 0xE8: case 0xE9: case 0xF1: // no-op, half words, syncs
+            case 0xF9: // blend color, not modelled
+                break;
+            default:
+                f3d_log_once(0x2000000000ULL | opcode, "[fast3d] unhandled display list command 0x%02x (w0=%08x w1=%08x)%.0u%.0u%.0u%.0u\n",
+                             opcode, cmd->words.w0, cmd->words.w1, 0, 0, 0, 0);
                 break;
         }
         ++cmd;
