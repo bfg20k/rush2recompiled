@@ -106,7 +106,7 @@ static struct RSP {
     bool lights_changed;
     
     uint32_t geometry_mode;
-    int16_t fog_mul, fog_offset;
+    float fog_mul, fog_offset; // G_MW_FOG values, or the floats of gEXSetFogFloat
     
     struct {
         // U0.16
@@ -124,7 +124,7 @@ static struct RDP {
     } timg;
     struct TileDesc {
         uint8_t fmt, siz, palette;
-        uint8_t cms, cmt, masks, maskt;
+        uint8_t cms, cmt, masks, maskt, shifts, shiftt;
         uint16_t line, tmem;         // 64-bit words
         uint16_t uls, ult, lrs, lrt; // U10.2
     } tiles[8];
@@ -487,6 +487,12 @@ static void gfx_matrix_mul(float res[4][4], const float a[4][4], const float b[4
     memcpy(res, tmp, sizeof(tmp));
 }
 
+static void gfx_sp_matrix_apply(uint8_t parameters, float matrix[4][4]);
+
+// G_SETTILE shift: 1..10 shifts the coordinate right (divide by 2^n), 11..15 left (multiply by 2^(16 - n)).
+static inline float tile_shift_scale(uint8_t shift) {
+    return shift == 0 ? 1.0f : shift <= 10 ? 1.0f / (float)(1u << shift) : (float)(1u << (16 - shift));
+}
 static void gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {
     float matrix[4][4];
 #ifndef GBI_FLOATS
@@ -503,20 +509,23 @@ static void gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {
     // For a modified GBI where fixed point values are replaced with floats
     memcpy(matrix, addr, sizeof(matrix));
 #endif
-    
+    gfx_sp_matrix_apply(parameters, matrix);
+}
+
+static void gfx_sp_matrix_apply(uint8_t parameters, float matrix[4][4]) {
     if (parameters & G_MTX_PROJECTION) {
         if (parameters & G_MTX_LOAD) {
-            memcpy(rsp.P_matrix, matrix, sizeof(matrix));
+            memcpy(rsp.P_matrix, matrix, sizeof(float[4][4]));
         } else {
             gfx_matrix_mul(rsp.P_matrix, matrix, rsp.P_matrix);
         }
     } else { // G_MTX_MODELVIEW
         if ((parameters & G_MTX_PUSH) && rsp.modelview_matrix_stack_size < 11) {
             ++rsp.modelview_matrix_stack_size;
-            memcpy(rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 2], sizeof(matrix));
+            memcpy(rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 2], sizeof(float[4][4]));
         }
         if (parameters & G_MTX_LOAD) {
-            memcpy(rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], matrix, sizeof(matrix));
+            memcpy(rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], matrix, sizeof(float[4][4]));
         } else {
             gfx_matrix_mul(rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], matrix, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1]);
         }
@@ -812,8 +821,8 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
         buf_vbo[buf_vbo_len++] = w;
         
         if (use_texture) {
-            float u = (v_arr[i]->u - prim_tile->uls * 8) / 32.0f;
-            float v = (v_arr[i]->v - prim_tile->ult * 8) / 32.0f;
+            float u = (v_arr[i]->u * tile_shift_scale(prim_tile->shifts) - prim_tile->uls * 8) / 32.0f;
+            float v = (v_arr[i]->v * tile_shift_scale(prim_tile->shiftt) - prim_tile->ult * 8) / 32.0f;
             if ((rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT) {
                 // Linear filter adds 0.5f to the coordinates
                 u += 0.5f;
@@ -957,8 +966,8 @@ static void gfx_sp_moveword(uint8_t index, uint16_t offset, uint32_t data) {
             g_segments[(offset >> 2) & 15] = data & 0x1FFFFFFF; // KSEG0 pointer or physical
             break;
         case G_MW_FOG:
-            rsp.fog_mul = (int16_t)(data >> 16);
-            rsp.fog_offset = (int16_t)data;
+            rsp.fog_mul = (float)(int16_t)(data >> 16);
+            rsp.fog_offset = (float)(int16_t)data;
             break;
     }
 }
@@ -1004,6 +1013,8 @@ static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t t
     t->cmt = cmt;
     t->masks = masks;
     t->maskt = maskt;
+    t->shifts = shifts;
+    t->shiftt = shiftt;
     rdp.textures_changed[0] = true;
     rdp.textures_changed[1] = true;
 }
@@ -1332,6 +1343,124 @@ static uint32_t dl_cmd_budget; // stops a display list that branches to itself
 #define C0(pos, width) ((cmd->words.w0 >> (pos)) & ((1U << width) - 1))
 #define C1(pos, width) ((cmd->words.w1 >> (pos)) & ((1U << width) - 1))
 
+
+// ---- RT64 extended GBI --------------------------------------------------------------------------------------------
+// The recomp's own code (HUD placement, draw distance, interpolation, pause menu) writes RT64 extended commands into
+// the display lists: opcode 0x64 with a 24-bit id, followed by 0 to 2 more 8-byte words whose contents are raw data.
+// Every word has to be consumed or those data words run as commands (an alignment offset of -960 is 0xFC40...: a
+// G_SETCOMBINE with garbage). Implemented: float matrices, the viewport command, float fog, and the push/pop state
+// stacks. Everything else (rect/viewport/scissor alignment origins, matrix groups for interpolation, car reflections,
+// sky fog) is consumed and ignored: the whole window is treated as the 4:3 area the game draws in.
+#define F3D_EX_STACK_DEPTH 8
+enum { EXS_OTHERMODE, EXS_COMBINE, EXS_ENV, EXS_FOG, EXS_FILL, EXS_PRIM, EXS_GEOM, EXS_SCISSOR, EXS_VIEWPORT, EXS_PROJ, EXS_COUNT };
+static struct ExSaved {
+    uint32_t om_l, om_h, geom;
+    uint64_t cc;
+    struct RGBA color;
+    uint8_t prim_lod;
+    struct XYWidthHeight rect;
+    float proj[4][4];
+} ex_stack[EXS_COUNT][F3D_EX_STACK_DEPTH];
+static int ex_depth[EXS_COUNT];
+
+static void gfx_ex_stack(int cat, bool push) {
+    if (push) {
+        if (ex_depth[cat] >= F3D_EX_STACK_DEPTH) {
+            return;
+        }
+        struct ExSaved *e = &ex_stack[cat][ex_depth[cat]++];
+        switch (cat) {
+            case EXS_OTHERMODE: e->om_l = rdp.other_mode_l; e->om_h = rdp.other_mode_h; break;
+            case EXS_COMBINE: e->cc = rdp.combine_mode; break;
+            case EXS_ENV: e->color = rdp.env_color; break;
+            case EXS_FOG: e->color = rdp.fog_color; break;
+            case EXS_FILL: e->color = rdp.fill_color; break;
+            case EXS_PRIM: e->color = rdp.prim_color; e->prim_lod = rdp.prim_lod_frac; break;
+            case EXS_GEOM: e->geom = rsp.geometry_mode; break;
+            case EXS_SCISSOR: e->rect = rdp.scissor; break;
+            case EXS_VIEWPORT: e->rect = rdp.viewport; break;
+            case EXS_PROJ: memcpy(e->proj, rsp.P_matrix, sizeof(e->proj)); break;
+        }
+        return;
+    }
+    if (ex_depth[cat] <= 0) {
+        return;
+    }
+    struct ExSaved *e = &ex_stack[cat][--ex_depth[cat]];
+    switch (cat) {
+        case EXS_OTHERMODE:
+            rdp.other_mode_l = e->om_l;
+            rdp.other_mode_h = e->om_h;
+            rdp.textures_changed[0] = rdp.textures_changed[1] = true;
+            break;
+        case EXS_COMBINE: rdp.combine_mode = e->cc; break;
+        case EXS_ENV: rdp.env_color = e->color; break;
+        case EXS_FOG: rdp.fog_color = e->color; break;
+        case EXS_FILL: rdp.fill_color = e->color; break;
+        case EXS_PRIM: rdp.prim_color = e->color; rdp.prim_lod_frac = e->prim_lod; break;
+        case EXS_GEOM: rsp.geometry_mode = e->geom; break;
+        case EXS_SCISSOR: rdp.scissor = e->rect; rdp.viewport_or_scissor_changed = true; break;
+        case EXS_VIEWPORT: rdp.viewport = e->rect; rdp.viewport_or_scissor_changed = true; break;
+        case EXS_PROJ:
+            memcpy(rsp.P_matrix, e->proj, sizeof(e->proj));
+            gfx_matrix_mul(rsp.MP_matrix, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], rsp.P_matrix);
+            break;
+    }
+}
+
+// Runs the extended command at cmd and returns how many 8-byte words it occupies.
+static int gfx_run_ex(const Gfx *cmd) {
+    const uint32_t id = cmd->words.w0 & 0xFFFFFF;
+    switch (id) {
+        case 0x30: { // G_EX_MATRIX_FLOAT: params (G_MTX flags with push inverted) here, float matrix address in word 2
+            float m[4][4];
+            memcpy(m, seg_addr(cmd[1].words.w1), sizeof(m));
+            gfx_sp_matrix_apply((uint8_t)((cmd->words.w1 & 0xFF) ^ G_MTX_PUSH), m);
+            return 2;
+        }
+        case 0x04: { // G_EX_SETVIEWPORT: origin here, Vp address in word 2
+            Vp_t vp;
+            f3d_read_vp(g_rdram, (uint32_t)((const uint8_t *)seg_addr(cmd[1].words.w1) - g_rdram), &vp);
+            gfx_calc_and_set_viewport(&vp);
+            return 2;
+        }
+        case 0x34: { // G_EX_SETFOGFLOAT (recomp addition): fog = z / w * mul + offset in G_MW_FOG units, as floats
+            uint32_t mul_bits = (uint32_t)cmd[1].words.w0, offset_bits = (uint32_t)cmd[1].words.w1;
+            memcpy(&rsp.fog_mul, &mul_bits, sizeof(float));
+            memcpy(&rsp.fog_offset, &offset_bits, sizeof(float));
+            return 2;
+        }
+        case 0x15: gfx_ex_stack(EXS_VIEWPORT, true); return 1;
+        case 0x16: gfx_ex_stack(EXS_VIEWPORT, false); return 1;
+        case 0x17: gfx_ex_stack(EXS_SCISSOR, true); return 1;
+        case 0x18: gfx_ex_stack(EXS_SCISSOR, false); return 1;
+        case 0x19: gfx_ex_stack(EXS_OTHERMODE, true); return 1;
+        case 0x1A: gfx_ex_stack(EXS_OTHERMODE, false); return 1;
+        case 0x1B: gfx_ex_stack(EXS_COMBINE, true); return 1;
+        case 0x1C: gfx_ex_stack(EXS_COMBINE, false); return 1;
+        case 0x1D: gfx_ex_stack(EXS_PROJ, true); return 1;
+        case 0x1E: gfx_ex_stack(EXS_PROJ, false); return 1;
+        case 0x1F: gfx_ex_stack(EXS_ENV, true); return 1;
+        case 0x20: gfx_ex_stack(EXS_ENV, false); return 1;
+        case 0x23: gfx_ex_stack(EXS_FOG, true); return 1;
+        case 0x24: gfx_ex_stack(EXS_FOG, false); return 1;
+        case 0x25: gfx_ex_stack(EXS_FILL, true); return 1;
+        case 0x26: gfx_ex_stack(EXS_FILL, false); return 1;
+        case 0x27: gfx_ex_stack(EXS_PRIM, true); return 1;
+        case 0x28: gfx_ex_stack(EXS_PRIM, false); return 1;
+        case 0x29: gfx_ex_stack(EXS_GEOM, true); return 1;
+        case 0x2A: gfx_ex_stack(EXS_GEOM, false); return 1;
+        // Consumed and ignored; the word counts are those of the gEX* macros in rt64_extended_gbi.h.
+        case 0x02: case 0x08: return 3;                                          // texture rectangle, scissor align
+        case 0x05: case 0x06: case 0x07: case 0x0C: case 0x13: case 0x14: case 0x31: return 2; // scissor, rect/viewport align, matrix group, edit group, vertex, vertex segment
+        default:
+            if (id >= 0x38) {
+                f3d_log_once(0x4000000000ULL | id, "[fast3d] unknown RT64 extended command 0x%06x%.0u%.0u%.0u%.0u%.0u%.0u\n", id, 0, 0, 0, 0, 0, 0);
+            }
+            return 1;
+    }
+}
+
 static void gfx_run_dl(Gfx* cmd) {
     int dummy = 0;
     for (;;) {
@@ -1539,6 +1668,9 @@ static void gfx_run_dl(Gfx* cmd) {
                 gfx_dp_fill_rectangle(C1(12, 12), C1(0, 12), C0(12, 12), C0(0, 12));
                 break;
 #endif
+            case 0x64: // RT64_EXTENDED_OPCODE
+                cmd += gfx_run_ex(cmd) - 1; // the loop's own increment steps past the last word
+                break;
             case 0xEF: // G_RDPSETOTHERMODE: the whole other-mode pair at once (high word in w0's low 24 bits)
                 if (rdp.other_mode_h != C0(0, 24) || (rdp.other_mode_l != cmd->words.w1)) {
                     rdp.textures_changed[0] = rdp.textures_changed[1] = true;

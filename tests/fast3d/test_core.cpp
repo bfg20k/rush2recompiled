@@ -182,6 +182,34 @@ static void test_direct_heap_pointers() {
           "vertices behind a 0x81800000 pointer (draws=%zu)", g_draws.size());
 }
 
+// RT64 extended commands carry raw data words: 0xFC40... must not run as a G_SETCOMBINE, and a float matrix must apply.
+static void test_extended_commands() {
+    reset_capture();
+    const uint32_t MTX = 0x1000, FMTX = 0x1100, DL = 0x2000, VTX = 0x3000;
+    put_matrix_identity(MTX);
+    float fm[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.5f, 0, 0, 1}; // identity translated by +0.5 in x
+    memcpy(rdram + FMTX, fm, sizeof(fm));
+    put_vtx(VTX + 0, -1, -1, 0, 0, 0, 255, 0, 0, 255);
+    put_vtx(VTX + 16, 1, -1, 0, 0, 0, 0, 255, 0, 255);
+    put_vtx(VTX + 32, 0, 1, 0, 0, 0, 0, 0, 255, 255);
+    dl_begin(DL);
+    common_setup(MTX);
+    cmd(0xE0525464u, 0x10000064u);          // gEXEnable
+    cmd(0x64000006u, 0x00000000u);          // gEXSetRectAlign: 2 words, the second one's data looks like opcodes
+    cmd(0xFC40FB00u, 0x03C0FFFFu);
+    cmd(0x64000030u, 0x00000003u);   // gEXMatrixFloat: modelview, load (0x02) with the push bit stored inverted
+    cmd(0u, 0x80000000u | FMTX);
+    g_vertex(VTX, 3, 0);
+    g_tri1(0, 1, 2);
+    g_enddl();
+    gfx_begin_frame();
+    gfx_run_task(DL);
+    gfx_end_frame();
+    CHECK(g_draws.size() == 1 && g_draws[0].vbo.size() == 24, "a draw follows extended commands (draws=%zu)", g_draws.size());
+    // x of the first vertex: -1 + 0.5 (the float matrix replaced the identity) in clip space, w = 1.
+    CHECK(g_draws.size() == 1 && near(g_draws[0].vbo[0], -0.5f), "float matrix applied, got %f", g_draws.empty() ? 0.0f : g_draws[0].vbo[0]);
+}
+
 static uint16_t col16(int i) { return (uint16_t)((i << 11) | ((31 - i) << 6) | (((i * 2) % 32) << 1) | (i & 1)); }
 
 static void test_texture_decode_and_cache() {
@@ -600,6 +628,7 @@ int main() {
     test_vertices_and_matrices();
     test_segments_and_nested_dl();
     test_direct_heap_pointers();
+    test_extended_commands();
     test_texture_decode_and_cache();
     test_tmem_formats();
     test_tmem_palettes();

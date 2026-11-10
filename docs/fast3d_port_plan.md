@@ -211,3 +211,8 @@ Nearly every 3D draw is in 2-cycle mode with G_FOG on, so the combiner was the n
 - G_TEXRECT now samples the tile named in the command (it used the last G_TEXTURE tile).
 - TLUT type IA16 (G_SETOTHERMODE_H bits 14-15 = 3) is decoded as intensity + alpha and is part of the texture cache key.
 - Test encoders now emit real hardware values (constant 0 is 31/15/7, not 0).
+
+## Third round: RT64 extended GBI and tile shifts
+
+- Opcode 0x64 is RT64's extended GBI (24-bit id, 1-3 words). Its continuation words are raw data, so `gfx_run_ex` consumes them instead of running them as F3DEX2 commands (this was what hid the HUD and menus). Ids 0x34-0x37 are the recomp's own additions (fog float, car reflection, sky fog, sky draw). Unknown ids are logged once as `unknown RT64 extended command`. Rect alignment and `gEXSetScissor` are ignored: the window is treated as the 4:3 area.
+- `G_SETTILE` shiftS/shiftT are now applied to texture coordinates (`tile_shift_scale`): 1-10 divides by 2^n, 11-15 multiplies by 2^(16-n). Needed by the attract screen's scrolling logo background.
