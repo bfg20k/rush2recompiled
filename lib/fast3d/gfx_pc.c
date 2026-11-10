@@ -668,7 +668,7 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const void *vert
 }
 
 static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
-    if (vtx1_idx >= MAX_VERTICES || vtx2_idx >= MAX_VERTICES || vtx3_idx >= MAX_VERTICES) {
+    if (vtx1_idx >= MAX_VERTICES + 4 || vtx2_idx >= MAX_VERTICES + 4 || vtx3_idx >= MAX_VERTICES + 4) { // the last 4 slots are the rect corners
         return;
     }
     struct LoadedVertex *v1 = &rsp.loaded_vertices[vtx1_idx];

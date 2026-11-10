@@ -163,6 +163,28 @@ static void test_segments_and_nested_dl() {
 }
 
 // The recompiled heap sits above 16 MB: a direct 0x81xxxxxx pointer must reach it, not wrap into segment 1.
+// Rectangles draw through the four extra vertex slots after the 64 the RSP holds; a bounds check on triangle indices
+// once rejected them, so no menu or HUD rectangle was ever drawn.
+static void test_rectangles_draw() {
+    reset_capture();
+    const uint32_t MTX = 0x1000, DL = 0x2000;
+    put_matrix_identity(MTX);
+    dl_begin(DL);
+    common_setup(MTX);
+    g_combine_shade();
+    cmd(0xFE000000u, 0x3000);                             // SETZIMG
+    cmd(0xFF000000u, 0x4000);                             // SETCIMG (a fill into the Z image is a Z clear and skipped)
+    cmd(0xF7000000u, 0xFFFFFFFFu);                        // SETFILLCOLOR
+    cmd(0xF6000000u | (40 << 14) | (40 << 2), (20 << 14) | (20 << 2)); // FILLRECT (20,20)..(40,40)
+    g_enddl();
+    gfx_begin_frame();
+    gfx_run_task(DL);
+    gfx_end_frame();
+    size_t tris = 0;
+    for (const Draw &d : g_draws) tris += d.tris;
+    CHECK(tris == 2, "a FILLRECT should draw 2 triangles, got %zu", tris);
+}
+
 static void test_direct_heap_pointers() {
     reset_capture();
     const uint32_t MTX = 0x1000, DL = 0x2000, HEAP = 0x01800000;
@@ -628,6 +650,7 @@ int main() {
     test_vertices_and_matrices();
     test_segments_and_nested_dl();
     test_direct_heap_pointers();
+    test_rectangles_draw();
     test_extended_commands();
     test_texture_decode_and_cache();
     test_tmem_formats();
