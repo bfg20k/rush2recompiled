@@ -165,9 +165,13 @@ static unsigned long get_time(void) {
     return 0;
 }
 
+static void dbg_note_draw(size_t tris);
+static void dbg_note_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry);
+
 static void gfx_flush(void) {
     if (buf_vbo_len > 0) {
         int num = buf_vbo_num_tris;
+        dbg_note_draw(buf_vbo_num_tris);
         unsigned long t0 = get_time();
         gfx_rapi->draw_triangles(buf_vbo, buf_vbo_len, buf_vbo_num_tris);
         buf_vbo_len = 0;
@@ -1144,6 +1148,7 @@ static void gfx_dp_set_fill_color(uint32_t packed_color) {
 }
 
 static void gfx_draw_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry) {
+    dbg_note_rect(ulx, uly, lrx, lry);
     uint32_t saved_other_mode_h = rdp.other_mode_h;
     uint32_t cycle_type = (rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE));
     
@@ -1409,7 +1414,10 @@ static void gfx_ex_stack(int cat, bool push) {
 }
 
 // Runs the extended command at cmd and returns how many 8-byte words it occupies.
+static void dbg_count_ext(void);
+static void dbg_count_unknown(void);
 static int gfx_run_ex(const Gfx *cmd) {
+    dbg_count_ext();
     const uint32_t id = cmd->words.w0 & 0xFFFFFF;
     switch (id) {
         case 0x30: { // G_EX_MATRIX_FLOAT: params (G_MTX flags with push inverted) here, float matrix address in word 2
@@ -1455,9 +1463,204 @@ static int gfx_run_ex(const Gfx *cmd) {
         case 0x05: case 0x06: case 0x07: case 0x0C: case 0x13: case 0x14: case 0x31: return 2; // scissor, rect/viewport align, matrix group, edit group, vertex, vertex segment
         default:
             if (id >= 0x38) {
+                dbg_count_unknown();
                 f3d_log_once(0x4000000000ULL | id, "[fast3d] unknown RT64 extended command 0x%06x%.0u%.0u%.0u%.0u%.0u%.0u\n", id, 0, 0, 0, 0, 0, 0);
             }
             return 1;
+    }
+}
+
+
+// ---- debugging: frame dumps, command traces and per-frame statistics ------------------------------------------------
+// RUSH2_F3D_DUMP_FRAMES=120,300  dumps those frames (counted from 1, one per gfx_begin_frame); creating the file
+// <dump dir>/f3d_dump_now dumps the next frame (checked every 20 frames, the file is deleted). RUSH2_F3D_DUMP_DIR is the
+// output directory (default "."). A dump is <dir>/f3d_frame_<n>.bin (non-zero RDRAM pages per task, replayable with
+// tools/f3d_replay) and <dir>/f3d_frame_<n>.txt (every command and draw). A stats line goes to stderr for dumped frames
+// and every 300th frame.
+// .bin layout (little endian): "F3DDUMP2", u32 width, u32 height, then records:
+//   u32 'TASK', u32 dl_addr, u32 npages, npages * (u32 page_index, 4096 bytes). Pages are the RDRAM pages that differ
+//   from the previous record (the first record is all non-zero pages). Ends at EOF.
+#define DBG_RDRAM_BYTES 0x20000000u // default dump range; RUSH2_F3D_DUMP_MB overrides it (the tests use a smaller RDRAM)
+#define DBG_PAGE 4096u
+static struct {
+    unsigned frame;
+    bool trace;
+    FILE *bin, *txt;
+    uint8_t *shadow;
+    unsigned stat_tasks, stat_draws, stat_tris, stat_rects, stat_cmds, stat_unknown, stat_ext;
+    unsigned want[32];
+    int num_want;
+    bool parsed;
+    uint32_t rdram_bytes;
+    char dir[512];
+} dbg;
+
+static const char *dbg_opname(uint32_t op) {
+    switch (op) {
+        case 0x01: return "VTX"; case 0x05: return "TRI1"; case 0x06: return "TRI2"; case 0x07: return "QUAD";
+        case 0x09: return "LINE3D"; case 0xD7: return "TEXTURE"; case 0xD9: return "GEOMETRYMODE"; case 0xDA: return "MTX";
+        case 0xDB: return "MOVEWORD"; case 0xDC: return "MOVEMEM"; case 0xDE: return "DL"; case 0xDF: return "ENDDL";
+        case 0xE2: return "SETOTHERMODE_L"; case 0xE3: return "SETOTHERMODE_H"; case 0xE4: return "TEXRECT";
+        case 0xE5: return "TEXRECTFLIP"; case 0xE6: return "RDPLOADSYNC"; case 0xE7: return "RDPPIPESYNC";
+        case 0xE8: return "RDPTILESYNC"; case 0xE9: return "RDPFULLSYNC"; case 0xEF: return "RDPSETOTHERMODE";
+        case 0xF0: return "LOADTLUT"; case 0xF2: return "SETTILESIZE"; case 0xF3: return "LOADBLOCK"; case 0xF4: return "LOADTILE";
+        case 0xF5: return "SETTILE"; case 0xF6: return "FILLRECT"; case 0xF7: return "SETFILLCOLOR"; case 0xF8: return "SETFOGCOLOR";
+        case 0xF9: return "SETBLENDCOLOR"; case 0xFA: return "SETPRIMCOLOR"; case 0xFB: return "SETENVCOLOR";
+        case 0xFC: return "SETCOMBINE"; case 0xFD: return "SETTIMG"; case 0xFE: return "SETZIMG"; case 0xFF: return "SETCIMG";
+        case 0x03: return "CULLDL"; case 0x04: return "BRANCH_Z"; case 0xD6: return "DMA_IO"; case 0xD8: return "POPMTX";
+        case 0x00: return "NOOP"; case 0x64: return "RT64_EXT"; case 0xE1: return "RDPHALF_1";
+        default: return "?";
+    }
+}
+
+static void dbg_count_ext(void) { dbg.stat_ext++; }
+static void dbg_count_unknown(void) { dbg.stat_unknown++; }
+
+static void dbg_trace_cmd(const Gfx *cmd) {
+    dbg.stat_cmds++;
+    if (dbg.txt != NULL) {
+        fprintf(dbg.txt, "%*s%-16s %08X %08X\n", dl_depth * 2, "", dbg_opname(cmd->words.w0 >> 24), cmd->words.w0, cmd->words.w1);
+    }
+}
+
+static void dbg_note_draw(size_t tris) {
+    dbg.stat_draws++;
+    dbg.stat_tris += (unsigned)tris;
+    if (dbg.txt != NULL) {
+        const struct TileDesc *t = &rdp.tiles[0];
+        fprintf(dbg.txt, "%*s  => DRAW tris=%u combine=%016llX othermode=%08X/%08X geom=%08X tile0 fmt=%d siz=%d %ux%u cm=%d/%d\n",
+                dl_depth * 2, "", (unsigned)tris, (unsigned long long)rdp.combine_mode, rdp.other_mode_h, rdp.other_mode_l,
+                rsp.geometry_mode, t->fmt, t->siz, (unsigned)(t->lrs - t->uls) / 4 + 1, (unsigned)(t->lrt - t->ult) / 4 + 1, t->cms, t->cmt);
+    }
+}
+
+static void dbg_note_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry) {
+    dbg.stat_rects++;
+    if (dbg.txt != NULL) {
+        fprintf(dbg.txt, "%*s  => RECT %d,%d .. %d,%d (1/4 px) combine=%016llX othermode=%08X/%08X\n", dl_depth * 2, "", ulx, uly,
+                lrx, lry, (unsigned long long)rdp.combine_mode, rdp.other_mode_h, rdp.other_mode_l);
+    }
+}
+
+static void dbg_parse_env(void) {
+    dbg.parsed = true;
+    const char *mb = getenv("RUSH2_F3D_DUMP_MB");
+    dbg.rdram_bytes = mb != NULL && atoi(mb) > 0 ? (uint32_t)atoi(mb) << 20 : DBG_RDRAM_BYTES;
+    const char *dir = getenv("RUSH2_F3D_DUMP_DIR");
+    snprintf(dbg.dir, sizeof(dbg.dir), "%s", dir != NULL && dir[0] ? dir : ".");
+    const char *list = getenv("RUSH2_F3D_DUMP_FRAMES");
+    while (list != NULL && *list != 0 && dbg.num_want < 32) {
+        char *end;
+        unsigned long v = strtoul(list, &end, 10);
+        if (end == list) {
+            break;
+        }
+        dbg.want[dbg.num_want++] = (unsigned)v;
+        list = *end == ',' ? end + 1 : end;
+    }
+}
+
+static bool dbg_should_dump(void) {
+    for (int i = 0; i < dbg.num_want; i++) {
+        if (dbg.want[i] == dbg.frame) {
+            return true;
+        }
+    }
+    if (dbg.frame % 20 == 0) {
+        char path[640];
+        snprintf(path, sizeof(path), "%s/f3d_dump_now", dbg.dir);
+        FILE *f = fopen(path, "rb");
+        if (f != NULL) {
+            fclose(f);
+            remove(path);
+            return true;
+        }
+    }
+    return false;
+}
+
+static void dbg_begin_frame(void) {
+    if (!dbg.parsed) {
+        dbg_parse_env();
+    }
+    dbg.frame++;
+    dbg.stat_tasks = dbg.stat_draws = dbg.stat_tris = dbg.stat_rects = dbg.stat_cmds = dbg.stat_unknown = dbg.stat_ext = 0;
+    if (!dbg_should_dump()) {
+        return;
+    }
+    char path[640];
+    snprintf(path, sizeof(path), "%s/f3d_frame_%u.bin", dbg.dir, dbg.frame);
+    dbg.bin = fopen(path, "wb");
+    snprintf(path, sizeof(path), "%s/f3d_frame_%u.txt", dbg.dir, dbg.frame);
+    dbg.txt = fopen(path, "w");
+    if (dbg.bin == NULL) {
+        fprintf(stderr, "[fast3d] cannot write the frame dump in %s\n", dbg.dir);
+        if (dbg.txt != NULL) fclose(dbg.txt);
+        dbg.txt = NULL;
+        return;
+    }
+    dbg.trace = true;
+    if (dbg.shadow == NULL) {
+        dbg.shadow = (uint8_t *)calloc(1, dbg.rdram_bytes); // untouched pages cost no memory
+    }
+    if (dbg.shadow == NULL) {
+        fclose(dbg.bin);
+        dbg.bin = NULL;
+        return;
+    }
+    memset(dbg.shadow, 0, 0); // shadow is re-zeroed lazily below
+    uint32_t hdr[2] = {gfx_current_dimensions.width, gfx_current_dimensions.height};
+    fwrite("F3DDUMP2", 1, 8, dbg.bin);
+    fwrite(hdr, 4, 2, dbg.bin);
+    fprintf(stderr, "[fast3d] dumping frame %u to %s/f3d_frame_%u.bin\n", dbg.frame, dbg.dir, dbg.frame);
+}
+
+// Writes the RDRAM pages that changed since the previous record.
+static void dbg_dump_task(uint32_t dl_addr) {
+    if (dbg.bin == NULL) {
+        return;
+    }
+    static uint8_t zero[DBG_PAGE];
+    uint32_t count = 0;
+    const uint32_t pages = dbg.rdram_bytes / DBG_PAGE;
+    // First pass counts, second writes: the count goes first in the record.
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass == 1) {
+            uint32_t head[3] = {0x4B534154u /* "TASK" */, dl_addr, count};
+            fwrite(head, 4, 3, dbg.bin);
+        }
+        for (uint32_t i = 0; i < pages; i++) {
+            const uint8_t *src = g_rdram + (size_t)i * DBG_PAGE;
+            uint8_t *old = dbg.shadow + (size_t)i * DBG_PAGE;
+            if (memcmp(src, old, DBG_PAGE) == 0) {
+                continue;
+            }
+            if (pass == 0) {
+                count++;
+            } else {
+                fwrite(&i, 4, 1, dbg.bin);
+                fwrite(src, 1, DBG_PAGE, dbg.bin);
+                memcpy(old, src, DBG_PAGE);
+            }
+        }
+    }
+    (void)zero;
+}
+
+static void dbg_end_frame(void) {
+    const bool dumping = dbg.bin != NULL || dbg.txt != NULL;
+    if (dumping || dbg.frame % 300 == 0) {
+        fprintf(stderr, "[fast3d] frame %u: %u tasks, %u cmds, %u draws (%u tris), %u rects, %u unknown ops, %u extended cmds\n",
+                dbg.frame, dbg.stat_tasks, dbg.stat_cmds, dbg.stat_draws, dbg.stat_tris, dbg.stat_rects, dbg.stat_unknown, dbg.stat_ext);
+    }
+    if (dbg.bin != NULL) fclose(dbg.bin);
+    if (dbg.txt != NULL) fclose(dbg.txt);
+    dbg.bin = NULL;
+    dbg.txt = NULL;
+    dbg.trace = false;
+    if (dbg.shadow != NULL) {
+        free(dbg.shadow); // the next dump starts from a full snapshot again
+        dbg.shadow = NULL;
     }
 }
 
@@ -1469,7 +1672,9 @@ static void gfx_run_dl(Gfx* cmd) {
         }
         dl_cmd_budget--;
         uint32_t opcode = cmd->words.w0 >> 24;
-        
+        if (dbg.trace) {
+            dbg_trace_cmd(cmd);
+        }
         switch (opcode) {
             // RSP commands:
             case G_MTX:
@@ -1691,6 +1896,7 @@ static void gfx_run_dl(Gfx* cmd) {
             case 0xF9: // blend color, not modelled
                 break;
             default:
+                dbg.stat_unknown++;
                 f3d_log_once(0x2000000000ULL | opcode, "[fast3d] unhandled display list command 0x%02x (w0=%08x w1=%08x)%.0u%.0u%.0u%.0u\n",
                              opcode, cmd->words.w0, cmd->words.w1, 0, 0, 0, 0);
                 break;
@@ -1724,11 +1930,14 @@ struct GfxRenderingAPI *gfx_get_current_rendering_api(void) {
 }
 
 void gfx_begin_frame(void) {
+    dbg_begin_frame();
     gfx_rapi->start_frame();
 }
 
 // Runs one RSP task's display list. dl_addr is the RDRAM address from OSTask::data_ptr.
 void gfx_run_task(uint32_t dl_addr) {
+    dbg.stat_tasks++;
+    dbg_dump_task(dl_addr & 0x1FFFFFFF);
     gfx_sp_reset();
     memset(g_segments, 0, sizeof(g_segments));
     dl_depth = 0;
@@ -1755,6 +1964,7 @@ void gfx_reapply_state(void) {
 }
 
 void gfx_end_frame(void) {
+    dbg_end_frame();
     gfx_rapi->end_frame();
     gfx_rapi->finish_render();
 }

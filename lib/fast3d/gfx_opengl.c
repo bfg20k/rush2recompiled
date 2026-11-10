@@ -115,6 +115,7 @@ typedef ptrdiff_t GLsizeiptr;
 
 // Optional: absent from OpenGL 2.1 drivers without a vertex array object extension. Only the GLSL 120 flavor may go without.
 #define GFXGL_OPTIONAL_FUNCTIONS(X)                                                                               \
+    X(GLenum, glGetError, (void))                                                                                 \
     X(void, glGenVertexArrays, (GLsizei n, GLuint *arrays))                                                       \
     X(void, glBindVertexArray, (GLuint array))
 
@@ -637,6 +638,16 @@ static void gfx_opengl_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size_
     }
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(sizeof(float) * buf_vbo_len), buf_vbo, GL_STREAM_DRAW);
     glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(3 * buf_vbo_num_tris));
+    if (glGetError != NULL) {
+        // Any error since the last draw (state calls included), reported once per error code and shader.
+        static unsigned reported;
+        GLenum err = glGetError();
+        if (err != 0 && reported < 40) {
+            reported++;
+            fprintf(stderr, "[fast3d] GL error 0x%04x at a draw (shader 0x%016llx, %u triangles)\n", (unsigned)err,
+                    (unsigned long long)current_program->shader_id, (unsigned)buf_vbo_num_tris);
+        }
+    }
 }
 
 static void gfx_opengl_init(void) {

@@ -30,6 +30,13 @@ target_link_libraries(fast3d_opengl_test PRIVATE fast3d_core)
 add_executable(fast3d_dump_glsl ${FAST3D_TESTS}/dump_glsl.c)
 target_link_libraries(fast3d_dump_glsl PRIVATE fast3d_core)
 
+# Frame dump replayer (tools/f3d_replay.c): needs SDL2 and a GL driver, so it is built only when SDL2 is found.
+find_package(SDL2 QUIET)
+if (SDL2_FOUND)
+    add_executable(f3d_replay ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/f3d_replay.c)
+    target_link_libraries(f3d_replay PRIVATE fast3d_core SDL2::SDL2)
+endif()
+
 enable_testing()
 add_test(NAME fast3d_core COMMAND fast3d_core_test)
 add_test(NAME fast3d_opengl COMMAND fast3d_opengl_test)
