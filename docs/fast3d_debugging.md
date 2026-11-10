@@ -32,3 +32,7 @@ draw's commands in the trace. This found the texture-window bug below.
   strips of a 96x96 image and sizes the tile at ult = 54, 12, 0; reading TMEM row 54 gave noise (and garbled tracks).
 - Transparent RGBA5551 texels keep no color (bilinear fringes otherwise).
 - Rect corners use vertex slots 64..67: the triangle bounds check must allow them.
+- Viewports and scissors are signed: the track select's 3D preview has a viewport that starts above the screen (y = -14),
+  which wrapped to 65522 as unsigned and hid the whole preview (the "black track select").
+- `RUSH2_F3D_FLUSH_VERTS=1` prints each batch's first clip-space vertex plus the viewport and scissor in effect, for telling
+  "culled / clipped" from "drawn off-screen".

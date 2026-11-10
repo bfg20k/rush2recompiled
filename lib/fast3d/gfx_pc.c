@@ -42,7 +42,7 @@ struct RGBA {
 };
 
 struct XYWidthHeight {
-    uint16_t x, y, width, height;
+    int32_t x, y, width, height; // signed: a view may start above or left of the screen (the track select preview does)
 };
 
 struct LoadedVertex {
@@ -183,6 +183,11 @@ static void gfx_flush(void) {
             if (r != NULL) sscanf(r, "%d,%d", &dbg_range_lo, &dbg_range_hi);
         }
         const int no = dbg_flush_no++;
+        if (getenv("RUSH2_F3D_FLUSH_VERTS") != NULL && buf_vbo_len >= 8) {
+            fprintf(stderr, "[fast3d] flush %d: tris=%zu first vertex x=%.3f y=%.3f z=%.3f w=%.3f viewport %d,%d %dx%d scissor %d,%d %dx%d\n", no, buf_vbo_num_tris, buf_vbo[0], buf_vbo[1], buf_vbo[2], buf_vbo[3],
+                    rendering_state.viewport.x, rendering_state.viewport.y, rendering_state.viewport.width, rendering_state.viewport.height,
+                    rendering_state.scissor.x, rendering_state.scissor.y, rendering_state.scissor.width, rendering_state.scissor.height);
+        }
         if (dbg_range_hi == -1 || (no >= dbg_range_lo && no < dbg_range_hi)) {
             gfx_rapi->draw_triangles(buf_vbo, buf_vbo_len, buf_vbo_num_tris);
         }
