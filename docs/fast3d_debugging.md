@@ -36,3 +36,9 @@ draw's commands in the trace. This found the texture-window bug below.
   which wrapped to 65522 as unsigned and hid the whole preview (the "black track select").
 - `RUSH2_F3D_FLUSH_VERTS=1` prints each batch's first clip-space vertex plus the viewport and scissor in effect, for telling
   "culled / clipped" from "drawn off-screen".
+- TMEM keeps the odd lines of a texture with the 32-bit halves of each 64-bit word swapped (address ^ 4). LOADBLOCK finds
+  the line by accumulating dxt, so a load with dxt 0 never swaps; the game ships those textures pre-swapped and the sampler
+  swaps odd rows back. Reading odd rows unswapped produced alternate-line garbage on the DANGER sign and billboards that
+  only some loads show (dxt 0 ones). Tests that load with `g_loadblock` use dxt 0x800 so they stay unswapped.
+- A dump's page list is now built once (the game thread writes RDRAM during the dump); old dumps may end with one stray
+  record, which the replay ignores.

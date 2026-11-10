@@ -49,7 +49,7 @@ int main(int argc, char **argv) {
     int tasks = 0;
     uint8_t page[4096];
     while (fread(head, 4, 3, f) == 3) {
-        if (head[0] != 0x4B534154u) { fprintf(stderr, "bad record\n"); return 1; }
+        if (head[0] != 0x4B534154u) { fprintf(stderr, "stray record at the end of the dump ignored\n"); break; } // older dumps
         for (uint32_t i = 0; i < head[2]; i++) {
             uint32_t idx;
             if (fread(&idx, 4, 1, f) != 1 || fread(page, 1, 4096, f) != 4096) { fprintf(stderr, "truncated\n"); return 1; }

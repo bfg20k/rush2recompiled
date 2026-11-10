@@ -67,7 +67,9 @@ static inline void g_settimg(uint32_t fmt, uint32_t siz, uint32_t width, uint32_
 static inline void g_settile(uint32_t fmt, uint32_t siz, uint32_t line, uint32_t tmem, uint32_t tile) {
     cmd(0xF5000000u | (fmt << 21) | (siz << 19) | (line << 9) | tmem, tile << 24);
 }
-static inline void g_loadblock(uint32_t tile, uint32_t lrs) { cmd(0xF3000000u, (tile << 24) | (lrs << 12)); }
+// dxt 0x800 steps one TMEM line per 64-bit word, i.e. rows one word long (the tests' tiles use line = 1). dxt 0 would leave
+// every row on line 0 and the sampler would then swap the odd rows, as the RDP does for data that is not pre-swapped.
+static inline void g_loadblock(uint32_t tile, uint32_t lrs, uint32_t dxt = 0x800) { cmd(0xF3000000u, (tile << 24) | (lrs << 12) | dxt); }
 static inline void g_settilesize(uint32_t tile, uint32_t w, uint32_t h) { cmd(0xF2000000u, (tile << 24) | (((w - 1) << 2) << 12) | ((h - 1) << 2)); }
 // SETTILE with every field: palette, clamp/mirror (cm: bit0 mirror, bit1 clamp) and mask (log2 wrap) for each axis.
 static inline void g_settile_full(uint32_t fmt, uint32_t siz, uint32_t line, uint32_t tmem, uint32_t tile, uint32_t palette,

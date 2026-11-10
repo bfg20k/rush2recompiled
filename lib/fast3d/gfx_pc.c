@@ -431,6 +431,9 @@ static void import_texture(int slot) {
             uint8_t *out = rgba + 4 * (y * w + x);
             uint32_t tx = x0 + x;
             uint32_t at = row + (tx * bits) / 8;
+            if (y & 1) {
+                at ^= 4; // odd lines hold their 64-bit words' halves swapped
+            }
             // Reads past TMEM (a window beyond the rows) give transparent black rather than leaving the array.
             uint8_t b0 = at < sizeof(tmem) ? tmem[at] : 0;
             uint8_t b1 = at + 1 < sizeof(tmem) ? tmem[at + 1] : 0;
@@ -1095,6 +1098,19 @@ static void gfx_dp_load_block(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t
         bytes = sizeof(tmem) - dst;
     }
     rdram_copy(tmem + dst, src, bytes);
+    // TMEM stores the odd lines of a texture with the two 32-bit halves of every 64-bit word swapped. LOADBLOCK finds the
+    // line by accumulating dxt (2048 per line) over the words it moves; dxt 0 never leaves line 0, so those textures
+    // arrive unswapped (the game ships them pre-swapped, and the sampler's swap below puts them right).
+    if (dxt != 0) {
+        for (uint32_t q = 0; (q + 1) * 8 <= bytes; q++) {
+            if (((q * dxt) >> 11) & 1) {
+                uint8_t *w = tmem + dst + q * 8, tmp[4];
+                memcpy(tmp, w, 4);
+                memcpy(w, w + 4, 4);
+                memcpy(w + 4, tmp, 4);
+            }
+        }
+    }
     rdp.textures_changed[0] = true;
     rdp.textures_changed[1] = true;
 }
@@ -1122,6 +1138,17 @@ static void gfx_dp_load_tile(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t 
             break;
         }
         rdram_copy(tmem + dst, src + r * src_stride, row_bytes);
+        if (r & 1) { // odd lines are stored at TMEM address ^ 4: each 64-bit word's 32-bit halves swapped (see gfx_dp_load_block)
+            uint8_t row[2048];
+            const uint32_t n = row_bytes < sizeof(row) ? row_bytes : (uint32_t)sizeof(row);
+            memcpy(row, tmem + dst, n);
+            memset(tmem + dst, 0, n);
+            for (uint32_t o = 0; o < n; o++) {
+                if (dst + (o ^ 4) < sizeof(tmem)) {
+                    tmem[dst + (o ^ 4)] = row[o];
+                }
+            }
+        }
     }
     rdp.textures_changed[0] = true;
     rdp.textures_changed[1] = true;
@@ -1653,31 +1680,30 @@ static void dbg_dump_task(uint32_t dl_addr) {
     if (dbg.bin == NULL) {
         return;
     }
-    static uint8_t zero[DBG_PAGE];
-    uint32_t count = 0;
+    // The game threads keep writing RDRAM while this runs, so the changed pages are listed once and exactly that list is
+    // written (counting and writing in two scans produced a record with more pages than its header said).
     const uint32_t pages = dbg.rdram_bytes / DBG_PAGE;
-    // First pass counts, second writes: the count goes first in the record.
-    for (int pass = 0; pass < 2; pass++) {
-        if (pass == 1) {
-            uint32_t head[3] = {0x4B534154u /* "TASK" */, dl_addr, count};
-            fwrite(head, 4, 3, dbg.bin);
-        }
-        for (uint32_t i = 0; i < pages; i++) {
-            const uint8_t *src = g_rdram + (size_t)i * DBG_PAGE;
-            uint8_t *old = dbg.shadow + (size_t)i * DBG_PAGE;
-            if (memcmp(src, old, DBG_PAGE) == 0) {
-                continue;
-            }
-            if (pass == 0) {
-                count++;
-            } else {
-                fwrite(&i, 4, 1, dbg.bin);
-                fwrite(src, 1, DBG_PAGE, dbg.bin);
-                memcpy(old, src, DBG_PAGE);
-            }
+    uint32_t *list = (uint32_t *)malloc(sizeof(uint32_t) * pages);
+    if (list == NULL) {
+        return;
+    }
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < pages; i++) {
+        if (memcmp(g_rdram + (size_t)i * DBG_PAGE, dbg.shadow + (size_t)i * DBG_PAGE, DBG_PAGE) != 0) {
+            list[count++] = i;
         }
     }
-    (void)zero;
+    uint32_t head[3] = {0x4B534154u /* "TASK" */, dl_addr, count};
+    fwrite(head, 4, 3, dbg.bin);
+    for (uint32_t k = 0; k < count; k++) {
+        const uint32_t i = list[k];
+        uint8_t page[DBG_PAGE];
+        memcpy(page, g_rdram + (size_t)i * DBG_PAGE, DBG_PAGE);
+        fwrite(&i, 4, 1, dbg.bin);
+        fwrite(page, 1, DBG_PAGE, dbg.bin);
+        memcpy(dbg.shadow + (size_t)i * DBG_PAGE, page, DBG_PAGE);
+    }
+    free(list);
 }
 
 static void dbg_end_frame(void) {

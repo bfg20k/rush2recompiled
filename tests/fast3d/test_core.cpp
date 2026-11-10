@@ -432,7 +432,7 @@ static void test_tmem_formats() {
     ups = draw_with_texture([&] {
         g_settimg(0, 3, 4, TEX);
         g_settile(0, 3, 0, 0, 7);
-        g_loadblock(7, 7);
+        g_loadblock(7, 7, 0x400); // two 64-bit words per row
         g_settile(0, 3, 1, 0, 0);
         g_settilesize(0, 4, 2);
     });
