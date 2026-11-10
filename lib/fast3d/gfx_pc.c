@@ -168,12 +168,24 @@ static unsigned long get_time(void) {
 static void dbg_note_draw(size_t tris);
 static void dbg_note_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry);
 
+// Debugging (replay tool): RUSH2_F3D_DRAW_RANGE=a,b draws only flushes number a..b-1 of the frame (read once).
+static int dbg_range_lo = -1, dbg_range_hi = -1, dbg_flush_no = 0;
+
 static void gfx_flush(void) {
     if (buf_vbo_len > 0) {
         int num = buf_vbo_num_tris;
         dbg_note_draw(buf_vbo_num_tris);
         unsigned long t0 = get_time();
-        gfx_rapi->draw_triangles(buf_vbo, buf_vbo_len, buf_vbo_num_tris);
+        if (dbg_range_hi < 0 && dbg_range_lo == -1) {
+            const char *r = getenv("RUSH2_F3D_DRAW_RANGE");
+            dbg_range_lo = 0;
+            dbg_range_hi = 0x7FFFFFFF;
+            if (r != NULL) sscanf(r, "%d,%d", &dbg_range_lo, &dbg_range_hi);
+        }
+        const int no = dbg_flush_no++;
+        if (dbg_range_hi == -1 || (no >= dbg_range_lo && no < dbg_range_hi)) {
+            gfx_rapi->draw_triangles(buf_vbo, buf_vbo_len, buf_vbo_num_tris);
+        }
         buf_vbo_len = 0;
         buf_vbo_num_tris = 0;
         unsigned long t1 = get_time();
@@ -344,8 +356,11 @@ static void tile_dims(const struct TileDesc *t, uint32_t *x0, uint32_t *y0, uint
     if (t->maskt != 0 && (1u << t->maskt) < hh) {
         hh = 1u << t->maskt;
     }
-    *x0 = t->uls >> 2;
-    *y0 = t->ult >> 2;
+    // The RDP subtracts the tile's (uls, ult) from every texture coordinate, and LOADTILE / LOADBLOCK store from the
+    // tile's TMEM origin, so the image always starts at TMEM row 0 / column 0 of the tile. A tile whose size window starts
+    // at ult = 54 (the radar map's strips) addresses the rows that were loaded, not row 54 of an image that isn't there.
+    *x0 = 0;
+    *y0 = 0;
     *w = ww;
     *h = hh;
 }
@@ -378,10 +393,13 @@ static inline bool tlut_is_ia16(void) {
 }
 
 static void put_rgba5551(uint8_t *out, uint16_t c) {
-    out[0] = SCALE_5_8(c >> 11);
-    out[1] = SCALE_5_8((c >> 6) & 0x1f);
-    out[2] = SCALE_5_8((c >> 1) & 0x1f);
-    out[3] = (c & 1) ? 255 : 0;
+    // A transparent texel keeps no color: with bilinear filtering its (often magenta) RGB would bleed into the opaque
+    // texels next to it as a fringe, which the RDP's point-sampled 1:1 rectangles never showed.
+    const bool opaque = (c & 1) != 0;
+    out[0] = opaque ? SCALE_5_8(c >> 11) : 0;
+    out[1] = opaque ? SCALE_5_8((c >> 6) & 0x1f) : 0;
+    out[2] = opaque ? SCALE_5_8((c >> 1) & 0x1f) : 0;
+    out[3] = opaque ? 255 : 0;
 }
 
 static void import_texture(int slot) {

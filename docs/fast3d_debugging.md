@@ -17,3 +17,18 @@ Replay starts from default RDP state, so state only set in an earlier frame is m
 
 ## File format
 See the comment above `dbg` in `lib/fast3d/gfx_pc.c`.
+
+## Bisecting a replay by draw call
+
+`RUSH2_F3D_DRAW_RANGE=a,b f3d_replay frame.bin out.ppm glsl120` draws only flushes a..b-1 of the frame (flush numbers count
+every batch sent to the GL backend, in order; the `.txt` trace's `=> DRAW` lines are the same batches, but rect batches
+are listed too). Render single flushes (`n,n+1`) and a contact sheet to find which draw makes a wrong pixel, then read that
+draw's commands in the trace. This found the texture-window bug below.
+
+## Lessons from dumps
+
+- A tile's `SETTILESIZE` window origin (uls, ult) is subtracted from the texture coordinates and LOADBLOCK/LOADTILE store
+  from the tile's TMEM origin, so a texture always reads from TMEM row 0 of its tile. The radar map loads three 96x42
+  strips of a 96x96 image and sizes the tile at ult = 54, 12, 0; reading TMEM row 54 gave noise (and garbled tracks).
+- Transparent RGBA5551 texels keep no color (bilinear fringes otherwise).
+- Rect corners use vertex slots 64..67: the triangle bounds check must allow them.

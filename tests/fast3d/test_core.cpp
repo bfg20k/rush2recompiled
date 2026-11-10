@@ -266,7 +266,8 @@ static void test_texture_decode_and_cache() {
         bool ok = u.rgba.size() == 64;
         for (int i = 0; ok && i < 16; i++) {
             int r = i, g = 31 - i, b = (i * 2) % 32, a = i & 1;
-            uint8_t e[4] = {(uint8_t)(r * 255 / 31), (uint8_t)(g * 255 / 31), (uint8_t)(b * 255 / 31), (uint8_t)(a ? 255 : 0)};
+            // a transparent texel keeps no color (bilinear fringe)
+            uint8_t e[4] = {(uint8_t)(a ? r * 255 / 31 : 0), (uint8_t)(a ? g * 255 / 31 : 0), (uint8_t)(a ? b * 255 / 31 : 0), (uint8_t)(a ? 255 : 0)};
             if (std::memcmp(&u.rgba[i * 4], e, 4) != 0) {
                 std::printf("FAIL texel %d: got %u,%u,%u,%u expected %u,%u,%u,%u\n", i, u.rgba[i * 4], u.rgba[i * 4 + 1], u.rgba[i * 4 + 2],
                             u.rgba[i * 4 + 3], e[0], e[1], e[2], e[3]);
@@ -612,6 +613,19 @@ static void test_tmem_tiles_and_sizes() {
     });
     CHECK(ups.size() == 1 && ups[0].width == 8 && ups[0].height == 2, "masked 8x2 got %dx%d", ups.empty() ? 0 : ups[0].width,
           ups.empty() ? 0 : ups[0].height);
+
+
+    // A size window that starts at row 2 (the radar map's strips do: ult = 54) addresses the rows that were loaded, from
+    // TMEM row 0: the RDP subtracts the window origin from the coordinates.
+    put_bytes(TEX + 0x200, {41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56});
+    ups = draw_with_texture([&] {
+        g_settimg(4, 1, 8, TEX + 0x200);
+        g_settile(4, 1, 1, 0, 7);
+        g_loadblock(7, 15);                       // 16 bytes: two rows of 8
+        g_settile(4, 1, 1, 0, 0);
+        g_settilesize_at(0, 0, 2, 8, 2);          // rows 2..3 of the image
+    });
+    upload_is(ups, 0, 8, 2, expand_i({41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56}), "window at ult=2 reads from TMEM row 0");
 
     // A tile that was never set up is a placeholder, not a crash.
     ups = draw_with_texture([&] { g_settile(4, 1, 0, 0, 0); });
