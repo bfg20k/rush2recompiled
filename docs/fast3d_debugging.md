@@ -42,3 +42,5 @@ draw's commands in the trace. This found the texture-window bug below.
   only some loads show (dxt 0 ones). Tests that load with `g_loadblock` use dxt 0x800 so they stay unswapped.
 - A dump's page list is now built once (the game thread writes RDRAM during the dump); old dumps may end with one stray
   record, which the replay ignores.
+- `FILLRECT` only uses the fill color in fill/copy cycle mode. In 1- and 2-cycle mode it runs the combiner and blender
+  with no texture and no shade (the car select's color swatches are FILLRECTs colored by PRIMITIVE).

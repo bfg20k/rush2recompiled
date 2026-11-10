@@ -1357,11 +1357,22 @@ static void gfx_dp_fill_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t
         lry += 1 << 2;
     }
     
+    if (mode != G_CYC_COPY && mode != G_CYC_FILL) {
+        // In 1- and 2-cycle mode a FILLRECT goes through the combiner and blender like any other primitive (the car select's
+        // color swatches are FILLRECTs colored by PRIMITIVE), with no texture and no shade: it does not use the fill color.
+        for (int i = MAX_VERTICES; i < MAX_VERTICES + 4; i++) {
+            struct LoadedVertex* v = &rsp.loaded_vertices[i];
+            v->color.r = v->color.g = v->color.b = v->color.a = 1.0f;
+        }
+        gfx_draw_rectangle(ulx, uly, lrx, lry);
+        return;
+    }
+
     for (int i = MAX_VERTICES; i < MAX_VERTICES + 4; i++) {
         struct LoadedVertex* v = &rsp.loaded_vertices[i];
         v->color = rdp.fill_color;
     }
-    
+
     uint64_t saved_combine_mode = rdp.combine_mode;
     gfx_dp_set_combine_mode(cc_only(4 /*SHADE*/, 4 /*SHADE alpha*/));
     gfx_draw_rectangle(ulx, uly, lrx, lry);
