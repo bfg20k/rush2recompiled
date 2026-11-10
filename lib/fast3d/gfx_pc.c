@@ -1248,20 +1248,30 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
     struct LoadedVertex* ll = &rsp.loaded_vertices[MAX_VERTICES + 1];
     struct LoadedVertex* lr = &rsp.loaded_vertices[MAX_VERTICES + 2];
     struct LoadedVertex* ur = &rsp.loaded_vertices[MAX_VERTICES + 3];
-    ul->u = uls;
-    ul->v = ult;
-    lr->u = lrs;
-    lr->v = lrt;
+    float u0 = uls, v0 = ult, u1 = lrs, v1 = lrt;
+    // The RDP samples a 1:1 rectangle exactly on texel centers, so bilinear never reaches outside it. Drawn larger than
+    // 320x240, GL's bilinear filter blends the rectangle's edge pixels with the texels next to it (the next glyph, or the
+    // far side of a wrapped tile). Pulling each end in by half a texel keeps every sample inside the rectangle's texels.
+    if ((rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT && (rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) != G_CYC_COPY &&
+        gfx_current_dimensions.height > 240 + 8) {
+        const float half = 16.0f; // half a texel in S10.5
+        if (u1 > u0 + 2 * half) { u0 += half; u1 -= half; } else if (u0 > u1 + 2 * half) { u0 -= half; u1 += half; }
+        if (v1 > v0 + 2 * half) { v0 += half; v1 -= half; } else if (v0 > v1 + 2 * half) { v0 -= half; v1 += half; }
+    }
+    ul->u = u0;
+    ul->v = v0;
+    lr->u = u1;
+    lr->v = v1;
     if (!flip) {
-        ll->u = uls;
-        ll->v = lrt;
-        ur->u = lrs;
-        ur->v = ult;
+        ll->u = u0;
+        ll->v = v1;
+        ur->u = u1;
+        ur->v = v0;
     } else {
-        ll->u = lrs;
-        ll->v = ult;
-        ur->u = uls;
-        ur->v = lrt;
+        ll->u = u1;
+        ll->v = v0;
+        ur->u = u0;
+        ur->v = v1;
     }
     
     f3d_log_once(0x3000000000ULL ^ ((uint64_t)tile << 40) ^ rdp.other_mode_l ^ ((uint64_t)rdp.other_mode_h << 7) ^ (rdp.combine_mode * 0x9E3779B97F4A7C15ull),
