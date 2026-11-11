@@ -330,7 +330,7 @@ static void add_renderer_option(recomp::config::Config& config) {
         "Direct3D 12 or Metal, and has every graphics option on this page. "
         "<recomp-color primary>Fast3D</recomp-color> is an experimental OpenGL 2.1 renderer for computers that "
         "can't run RT64; it hides the options it doesn't support (resolution scale, anti-aliasing, texture packs and "
-        "effects, and frame interpolation are RT64's). <recomp-color secondary>Takes effect the next time the game "
+        "effects, and frame interpolation are RT64's). <recomp-color primary>Takes effect the next time the game "
         "starts.</recomp-color>",
         {
             { Renderer::RT64, "RT64", "RT64" },
