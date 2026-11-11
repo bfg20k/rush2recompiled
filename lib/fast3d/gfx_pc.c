@@ -2038,7 +2038,6 @@ void gfx_reapply_state(void) {
     gfx_rapi->set_use_alpha(rendering_state.alpha_blend);
     gfx_rapi->set_viewport(rendering_state.viewport.x, rendering_state.viewport.y, rendering_state.viewport.width, rendering_state.viewport.height);
     gfx_rapi->set_scissor(rendering_state.scissor.x, rendering_state.scissor.y, rendering_state.scissor.width, rendering_state.scissor.height);
-            fprintf(stderr, "[fast3d]   alpha_blend=%d depth_test=%d depth_mask=%d floats/vertex=%zu\n", (int)rendering_state.alpha_blend, (int)rendering_state.depth_test, (int)rendering_state.depth_mask, buf_vbo_len / (buf_vbo_num_tris * 3));
     if (rendering_state.shader_program != NULL) {
         gfx_rapi->load_shader(rendering_state.shader_program); // program, attribute pointers, uniforms
     }
