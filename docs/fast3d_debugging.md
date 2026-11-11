@@ -44,3 +44,11 @@ draw's commands in the trace. This found the texture-window bug below.
   record, which the replay ignores.
 - `FILLRECT` only uses the fill color in fill/copy cycle mode. In 1- and 2-cycle mode it runs the combiner and blender
   with no texture and no shade (the car select's color swatches are FILLRECTs colored by PRIMITIVE).
+
+## Transparent texels in opaque draws (the traffic cones)
+
+The RDP ignores the RGBA5551 alpha bit unless the blender or alpha compare uses it, so a texture can be "transparent"
+and still be drawn in its stored color. The cones are CI4 with palette entry 0 = `f802` (alpha 0) and every texel index
+0: black cones if the decoder zeroes transparent texels. `bleed_transparent_texels` (gfx_pc.c) gives a transparent texel
+the average of its opaque neighbors (no fringe, no spots) and keeps the stored color when it has none.
+`RUSH2_F3D_FLUSH_VERTS=1` also logs each texture import (format, size, palette, TLUT head, first TMEM row).
