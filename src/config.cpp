@@ -1108,7 +1108,7 @@ static void hide_rt64_only_options(recomp::config::Config& config) {
                                    go::msaa_option, anisotropy_option::id, mipmap_option::id, ambient_occlusion_option::id,
                                    sky_fog_option::id, car_lighting_option::id, car_sheen_option::id, car_reflections_option::id,
                                    reflection_blur_option::id, reflection_rate_option::id, font_option::id,
-                                   rush2::upscale::dreamcast_option_id, rush2::upscale::interface_option_id,
+                                   rush2::upscale::interface_option_id,
                                    rush2::upscale::car_colors_option_id, rush2::upscale::mode_option_id,
                                    rush2::upscale::command_option_id }) {
         config.update_option_hidden(id, true);
