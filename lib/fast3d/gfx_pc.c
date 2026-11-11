@@ -436,7 +436,16 @@ static void put_rgba5551(uint8_t *out, uint16_t c) {
 // texture that is transparent throughout (the traffic cones: palette entry 0 is orange with alpha 0) is drawn in opaque
 // mode, where the RDP ignores the alpha bit and shows that color.
 static void bleed_transparent_texels(uint8_t *rgba, uint32_t w, uint32_t h) {
-    static uint8_t out[8192 * 3];
+    static uint8_t *out = NULL;
+    static size_t out_size = 0;
+    if ((size_t)w * h * 3 > out_size) {
+        out_size = (size_t)w * h * 3;
+        out = (uint8_t *)realloc(out, out_size);
+        if (out == NULL) {
+            out_size = 0;
+            return;
+        }
+    }
     for (uint32_t y = 0; y < h; y++) {
         for (uint32_t x = 0; x < w; x++) {
             const uint8_t *px = rgba + 4 * (y * w + x);
