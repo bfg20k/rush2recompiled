@@ -185,6 +185,55 @@ static void test_rectangles_draw() {
     CHECK(tris == 2, "a FILLRECT should draw 2 triangles, got %zu", tris);
 }
 
+// The game area can be wider than 4:3: a 4:3 image is centered in it, an aligned rectangle is placed from its origin, and
+// the frame clear (a fill over the whole screen) fills the area.
+static void rect_x_range(uint32_t dl_setup, float *lo, float *hi, uint32_t ulx, uint32_t lrx, bool aligned, uint32_t lorigin, uint32_t rorigin, int off) {
+    reset_capture();
+    const uint32_t MTX = 0x1000, DL = 0x2000;
+    put_matrix_identity(MTX);
+    dl_begin(DL);
+    common_setup(MTX);
+    cmd(0xFE000000u, 0x3000);
+    cmd(0xFF000000u, 0x4000);
+    cmd(0xF7000000u, 0xFFFFFFFFu);
+    if (aligned) {
+        cmd(0x64000006u, (rorigin << 12) | lorigin);
+        cmd(((uint32_t)(int16_t)(off * 4) << 16), ((uint32_t)(int16_t)(off * 4) << 16));
+    }
+    cmd(0xF6000000u | (lrx << 14) | (40 << 2), (ulx << 14) | (20 << 2));
+    g_enddl();
+    (void)dl_setup;
+    gfx_begin_frame();
+    gfx_run_task(DL);
+    gfx_end_frame();
+    *lo = 1e9f;
+    *hi = -1e9f;
+    for (const Draw &d : g_draws) {
+        for (size_t i = 0; i + 8 <= d.vbo.size(); i += 8) {
+            *lo = std::min(*lo, d.vbo[i]);
+            *hi = std::max(*hi, d.vbo[i]);
+        }
+    }
+}
+
+static void test_widescreen_rects() {
+    gfx_set_game_area(0, 0, 640, 240); // 8:3, twice the width of the 4:3 image at the same height
+    float lo, hi;
+    // A rectangle at game x 20..40 keeps its 4:3 place: window x = 320 + (x - 160).
+    rect_x_range(0, &lo, &hi, 20, 40, false, 0, 0, 0);
+    CHECK(near(lo, (320.0f + 20 - 160) / 640.0f * 2 - 1) && near(hi, (320.0f + 40 - 160) / 640.0f * 2 - 1), "centered rect %f %f", lo, hi);
+    // Anchored to the left edge (G_EX_ORIGIN_LEFT, 0): window x = x.
+    rect_x_range(0, &lo, &hi, 20, 40, true, 0x000, 0x000, 0);
+    CHECK(near(lo, 20.0f / 640.0f * 2 - 1) && near(hi, 40.0f / 640.0f * 2 - 1), "left anchored rect %f %f", lo, hi);
+    // Anchored to the right edge, its coordinates offset by -320 as the game's hud does: window x = 640 + (x - 320).
+    rect_x_range(0, &lo, &hi, 280, 300, true, 0x400, 0x400, -320);
+    CHECK(near(lo, (640.0f + 280 - 320) / 640.0f * 2 - 1) && near(hi, (640.0f + 300 - 320) / 640.0f * 2 - 1), "right anchored rect %f %f", lo, hi);
+    // A FILLRECT over the whole screen (the frame clear) fills the whole area.
+    rect_x_range(0, &lo, &hi, 0, 320, false, 0, 0, 0);
+    CHECK(near(lo, -1) && near(hi, 1), "full screen fill %f %f", lo, hi);
+    gfx_set_game_area(0, 0, 320, 240);
+}
+
 static void test_direct_heap_pointers() {
     reset_capture();
     const uint32_t MTX = 0x1000, DL = 0x2000, HEAP = 0x01800000;
@@ -665,6 +714,7 @@ int main() {
     test_segments_and_nested_dl();
     test_direct_heap_pointers();
     test_rectangles_draw();
+    test_widescreen_rects();
     test_extended_commands();
     test_texture_decode_and_cache();
     test_tmem_formats();

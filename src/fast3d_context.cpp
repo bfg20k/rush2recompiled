@@ -2,6 +2,8 @@
 
 #ifdef RUSH2_FAST3D
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -13,6 +15,7 @@
 #endif
 
 #include "recompui/recompui.h"
+#include "ultramodern/config.hpp"
 #include "ui_gl_renderer.h"
 
 extern "C" {
@@ -115,8 +118,8 @@ public:
             SDL_SetWindowFullscreen(window, new_config.wm_option == ultramodern::renderer::WindowMode::Fullscreen
                                                 ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
         }
-        // Resolution scale, MSAA, aspect modes and the high-precision framebuffer have no Fast3D equivalent yet; the
-        // image always fills the window.
+        // Resolution scale, MSAA and the high-precision framebuffer have no Fast3D equivalent yet. The aspect ratio
+        // option is read every frame (refresh_dimensions).
         return true;
     }
 
@@ -183,11 +186,35 @@ private:
     void refresh_dimensions() {
         int w = 0, h = 0;
         SDL_GL_GetDrawableSize(window, &w, &h);
-        if (w > 0 && h > 0 && ((uint32_t)w != width || (uint32_t)h != height)) {
+        if (w > 0 && h > 0) {
             width = (uint32_t)w;
             height = (uint32_t)h;
-            gfx_set_dimensions(width, height);
         }
+        if (width == 0 || height == 0) {
+            return;
+        }
+        // The game's image follows the aspect ratio option like the RT64 renderer's: Original is 4:3, Manual 16:9, and
+        // Expand fills the window (never narrower than 4:3). It is centered in the window with black bars around it.
+        float aspect = 4.0f / 3.0f;
+        switch (ultramodern::renderer::get_graphics_config().ar_option) {
+            case ultramodern::renderer::AspectRatio::Manual:
+                aspect = 16.0f / 9.0f;
+                break;
+            case ultramodern::renderer::AspectRatio::Expand:
+                aspect = std::max(aspect, (float)width / (float)height);
+                break;
+            default:
+                break;
+        }
+        uint32_t area_w = width, area_h = height;
+        if ((float)width / (float)height > aspect) {
+            area_w = (uint32_t)std::lround((float)height * aspect);
+        } else {
+            area_h = (uint32_t)std::lround((float)width / aspect);
+        }
+        area_w = std::clamp<uint32_t>(area_w, 1, width);
+        area_h = std::clamp<uint32_t>(area_h, 1, height);
+        gfx_set_game_area((int)((width - area_w) / 2), (int)((height - area_h) / 2), area_w, area_h);
     }
 
     void open_frame() {

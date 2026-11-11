@@ -216,3 +216,20 @@ Nearly every 3D draw is in 2-cycle mode with G_FOG on, so the combiner was the n
 
 - Opcode 0x64 is RT64's extended GBI (24-bit id, 1-3 words). Its continuation words are raw data, so `gfx_run_ex` consumes them instead of running them as F3DEX2 commands (this was what hid the HUD and menus). Ids 0x34-0x37 are the recomp's own additions (fog float, car reflection, sky fog, sky draw). Unknown ids are logged once as `unknown RT64 extended command`. Rect alignment and `gEXSetScissor` are ignored: the window is treated as the 4:3 area.
 - `G_SETTILE` shiftS/shiftT are now applied to texture coordinates (`tile_shift_scale`): 1-10 divides by 2^n, 11-15 multiplies by 2^(16-n). Needed by the attract screen's scrolling logo background.
+
+## Phase 5, first part: widescreen
+
+The game area (`gfx_set_game_area`, set by `Fast3DContext::refresh_dimensions` every frame) follows the aspect ratio
+option: Original 4:3, Manual 16:9, Expand the window (never narrower than 4:3), centered with black bars; the UI still
+draws over the whole window. Inside it (`gfx_pc.c`, "widescreen"):
+
+- A view whose viewport spans the screen (12 pixel overscan border allowed) fills the area and keeps its vertical
+  field of view: its x is squeezed by 4:3 / aspect, so the clip planes show more scene to the sides. Other viewports
+  (split screen, model views) keep the 4:3 scale centered in the area (`view_squeezed`).
+- The RT64 extended GBI alignment is implemented: `G_EX_SETRECTALIGN` (rectangles), `G_EX_SETSCISSOR` and the origin of
+  `G_EX_SETVIEWPORT`. An edge is placed at `origin / 0x400` of the area's width plus its coordinate (4:3 game pixels)
+  times `height / 240`; `G_EX_ORIGIN_NONE` is the plain 4:3 mapping centered in the area. Rectangle offsets are
+  added to the coordinates (the hud subtracts the origin's own position itself). Scissor ends at 0 or 320 go to the
+  area's edges. The scissor is always clipped to the game area. Not done: the texture rectangle (0x02), viewport align
+  (0x07) and scissor align (0x08) commands, which the game does not emit.
+- A FILLRECT over the whole 4:3 screen (the frame clear that paints the sky color) fills the whole area.

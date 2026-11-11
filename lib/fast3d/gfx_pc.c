@@ -170,6 +170,23 @@ static void dbg_note_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry);
 
 // Debugging (replay tool): RUSH2_F3D_DRAW_RANGE=a,b draws only flushes number a..b-1 of the frame (read once).
 static uint64_t dbg_last_cc_id;
+// The game area's offset in the window, in pixels (GL's origin, bottom left). The game's own coordinates are within it.
+static int game_area_x, game_area_y;
+
+static void gfx_apply_viewport(const struct XYWidthHeight *v) {
+    gfx_rapi->set_viewport(v->x + game_area_x, v->y + game_area_y, v->width, v->height);
+}
+
+// The scissor never leaves the game area, so an aligned rectangle or a widened view can't draw over the bars.
+static void gfx_apply_scissor(const struct XYWidthHeight *sc) {
+    int x0 = sc->x, y0 = sc->y, x1 = sc->x + sc->width, y1 = sc->y + sc->height;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > (int)gfx_current_dimensions.width) x1 = (int)gfx_current_dimensions.width;
+    if (y1 > (int)gfx_current_dimensions.height) y1 = (int)gfx_current_dimensions.height;
+    gfx_rapi->set_scissor(x0 + game_area_x, y0 + game_area_y, x1 > x0 ? x1 - x0 : 0, y1 > y0 ? y1 - y0 : 0);
+}
+
 static int dbg_range_lo = -1, dbg_range_hi = -1, dbg_flush_no = 0;
 
 static void gfx_flush(void) {
@@ -629,6 +646,54 @@ static void gfx_sp_pop_matrix(uint32_t count) {
     }
 }
 
+// ---- widescreen -------------------------------------------------------------------------------------------------
+// The game draws in a 320x240 (4:3) space. The game area (gfx_current_dimensions, at an offset in the window) can be
+// wider than 4:3; a 4:3 image is centered in it at the area's height (`game_scale()` window pixels per game pixel).
+// Three things widen:
+//  * a view whose viewport spans the screen (see view_spans_screen) fills the area and keeps its vertical field of view,
+//    so it shows more to the sides: its x is squeezed by (4:3 / aspect) and the viewport is the whole area;
+//  * rectangles and scissors carry RT64 extended GBI alignment (G_EX_ORIGIN_*): an edge is placed from a point of the
+//    area (left, center, right: origin / 0x400 of its width) by the coordinate (in 4:3 game pixels) times game_scale().
+//    G_EX_ORIGIN_NONE is the plain 4:3 mapping centered in the area;
+//  * a FILLRECT over the whole 4:3 screen (the frame clear) fills the whole area.
+#define EX_ORIGIN_NONE 0x800
+static struct {
+    bool active;                 // set by G_EX_SETRECTALIGN; reset at the start of every task
+    uint16_t lorigin, rorigin;
+    int32_t off[4];              // quarter pixels added to ulx, uly, lrx, lry
+} rect_align;
+static bool view_squeezed = true; // whether the current view's x is squeezed to the area (see above)
+
+static float game_scale(void) {
+    return (float)gfx_current_dimensions.height / (float)SCREEN_HEIGHT;
+}
+
+// Window pixel (within the game area) of a coordinate x_q (quarter game pixels) placed from `origin`.
+static float align_x_px(uint16_t origin, float x_q) {
+    const float w = (float)gfx_current_dimensions.width;
+    if (origin == EX_ORIGIN_NONE) {
+        return w * 0.5f + (x_q / 4.0f - SCREEN_WIDTH * 0.5f) * game_scale();
+    }
+    return (float)origin * (w / 1024.0f) + (x_q / 4.0f) * game_scale();
+}
+
+// The plain mapping of a game x (pixels) for a scissor edge or viewport: the screen's edges go to the area's edges, the
+// rest keep the 4:3 image centered.
+static float edge_x_px(float x) {
+    if (x <= 0.0f) {
+        return 0.0f;
+    }
+    if (x >= (float)SCREEN_WIDTH) {
+        return (float)gfx_current_dimensions.width;
+    }
+    return align_x_px(EX_ORIGIN_NONE, x * 4.0f);
+}
+
+// A viewport spanning the screen (the game insets it by the 12 pixel overscan border) is the main view.
+static bool view_spans_screen(float left_px, float width_px) {
+    return left_px <= 14.0f && left_px + width_px >= (float)SCREEN_WIDTH - 14.0f;
+}
+
 static float gfx_adjust_x_for_aspect_ratio(float x) {
     return x * (4.0f / 3.0f) / ((float)gfx_current_dimensions.width / (float)gfx_current_dimensions.height);
 }
@@ -653,7 +718,9 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const void *vert
         float z = v->ob[0] * rsp.MP_matrix[0][2] + v->ob[1] * rsp.MP_matrix[1][2] + v->ob[2] * rsp.MP_matrix[2][2] + rsp.MP_matrix[3][2];
         float w = v->ob[0] * rsp.MP_matrix[0][3] + v->ob[1] * rsp.MP_matrix[1][3] + v->ob[2] * rsp.MP_matrix[2][3] + rsp.MP_matrix[3][3];
         
-        x = gfx_adjust_x_for_aspect_ratio(x);
+        if (view_squeezed) {
+            x = gfx_adjust_x_for_aspect_ratio(x);
+        }
         
         short U = v->tc[0] * rsp.texture_scaling_factor.s >> 16;
         short V = v->tc[1] * rsp.texture_scaling_factor.t >> 16;
@@ -813,12 +880,12 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     if (rdp.viewport_or_scissor_changed) {
         if (memcmp(&rdp.viewport, &rendering_state.viewport, sizeof(rdp.viewport)) != 0) {
             gfx_flush();
-            gfx_rapi->set_viewport(rdp.viewport.x, rdp.viewport.y, rdp.viewport.width, rdp.viewport.height);
+            gfx_apply_viewport(&rdp.viewport);
             rendering_state.viewport = rdp.viewport;
         }
         if (memcmp(&rdp.scissor, &rendering_state.scissor, sizeof(rdp.scissor)) != 0) {
             gfx_flush();
-            gfx_rapi->set_scissor(rdp.scissor.x, rdp.scissor.y, rdp.scissor.width, rdp.scissor.height);
+            gfx_apply_scissor(&rdp.scissor);
             rendering_state.scissor = rdp.scissor;
         }
         rdp.viewport_or_scissor_changed = false;
@@ -975,16 +1042,29 @@ static void gfx_sp_geometry_mode(uint32_t clear, uint32_t set) {
     rsp.geometry_mode |= set;
 }
 
-static void gfx_calc_and_set_viewport(const Vp_t *viewport) {
+// origin: the G_EX_ORIGIN_* of an extended viewport (its x is relative to it), or -1 for the game's own.
+static void gfx_calc_and_set_viewport(const Vp_t *viewport, int origin) {
     // 2 bits fraction
     float width = 2.0f * viewport->vscale[0] / 4.0f;
     float height = 2.0f * viewport->vscale[1] / 4.0f;
     float x = (viewport->vtrans[0] / 4.0f) - width / 2.0f;
     float y = SCREEN_HEIGHT - ((viewport->vtrans[1] / 4.0f) + height / 2.0f);
-    
-    width *= RATIO_X;
+
+    if (origin >= 0 && origin != EX_ORIGIN_NONE) {
+        // Placed from a point of the area, at the 4:3 scale: a model viewport (the pause menu's car).
+        x = align_x_px((uint16_t)origin, x * 4.0f);
+        width *= game_scale();
+        view_squeezed = false;
+    } else if (view_spans_screen(x, width)) {
+        x = 0.0f;
+        width = (float)gfx_current_dimensions.width;
+        view_squeezed = true; // its x is squeezed, so the area shows more than 4:3 of the scene
+    } else {
+        x = edge_x_px(x);
+        width *= game_scale();
+        view_squeezed = false;
+    }
     height *= RATIO_Y;
-    x *= RATIO_X;
     y *= RATIO_Y;
     
     rdp.viewport.x = x;
@@ -1001,7 +1081,7 @@ static void gfx_sp_movemem(uint8_t index, uint8_t offset, const void* data) {
         {
             Vp_t vp;
             f3d_read_vp(g_rdram, (uint32_t)((const uint8_t *)data - g_rdram), &vp);
-            gfx_calc_and_set_viewport(&vp);
+            gfx_calc_and_set_viewport(&vp, -1);
         }
             break;
 #if 0
@@ -1067,18 +1147,18 @@ static void gfx_sp_texture(uint16_t sc, uint16_t tc, uint8_t level, uint8_t tile
     }
 }
 
-static void gfx_dp_set_scissor(uint32_t mode, uint32_t ulx, uint32_t uly, uint32_t lrx, uint32_t lry) {
-    float x = ulx / 4.0f * RATIO_X;
-    float y = (SCREEN_HEIGHT - lry / 4.0f) * RATIO_Y;
-    float width = (lrx - ulx) / 4.0f * RATIO_X;
-    float height = (lry - uly) / 4.0f * RATIO_Y;
-    
-    rdp.scissor.x = x;
-    rdp.scissor.y = y;
-    rdp.scissor.width = width;
-    rdp.scissor.height = height;
-    
+// Sets the scissor from window pixels (x0..x1 across, y0..y1 down, within the game area).
+static void gfx_set_scissor_px(float x0, float y0, float x1, float y1) {
+    rdp.scissor.x = (int32_t)lroundf(x0);
+    rdp.scissor.y = (int32_t)lroundf((float)gfx_current_dimensions.height - y1);
+    rdp.scissor.width = x1 > x0 ? (int32_t)lroundf(x1 - x0) : 0;
+    rdp.scissor.height = y1 > y0 ? (int32_t)lroundf(y1 - y0) : 0;
     rdp.viewport_or_scissor_changed = true;
+}
+
+static void gfx_dp_set_scissor(uint32_t mode, uint32_t ulx, uint32_t uly, uint32_t lrx, uint32_t lry) {
+    const float s = game_scale();
+    gfx_set_scissor_px(edge_x_px(ulx / 4.0f), uly / 4.0f * s, edge_x_px(lrx / 4.0f), lry / 4.0f * s);
 }
 
 static void gfx_dp_set_texture_image(uint32_t format, uint32_t size, uint32_t width, const void* addr) {
@@ -1252,6 +1332,7 @@ static void gfx_dp_set_fill_color(uint32_t packed_color) {
     rdp.fill_color.a = a * 255;
 }
 
+static bool rect_is_fill; // the rectangle being drawn is a FILLRECT
 static void gfx_draw_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry) {
     dbg_note_rect(ulx, uly, lrx, lry);
     uint32_t saved_other_mode_h = rdp.other_mode_h;
@@ -1274,6 +1355,19 @@ static void gfx_draw_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lr
     
     ulxf = gfx_adjust_x_for_aspect_ratio(ulxf);
     lrxf = gfx_adjust_x_for_aspect_ratio(lrxf);
+    {
+        const float w = (float)gfx_current_dimensions.width;
+        if (rect_align.active) {
+            // Extended alignment: the edges are placed from their origins (the vertical offsets move the rows).
+            ulxf = align_x_px(rect_align.lorigin, (float)(ulx + rect_align.off[0])) / w * 2.0f - 1.0f;
+            lrxf = align_x_px(rect_align.rorigin, (float)(lrx + rect_align.off[2])) / w * 2.0f - 1.0f;
+            ulyf = -((float)(uly + rect_align.off[1]) / (4.0f * HALF_SCREEN_HEIGHT)) + 1.0f;
+            lryf = -((float)(lry + rect_align.off[3]) / (4.0f * HALF_SCREEN_HEIGHT)) + 1.0f;
+        } else if (rect_is_fill && ulx <= 0 && lrx >= SCREEN_WIDTH * 4) {
+            ulxf = -1.0f; // the frame clear fills the whole area, not only its 4:3 part
+            lrxf = 1.0f;
+        }
+    }
     
     struct LoadedVertex* ul = &rsp.loaded_vertices[MAX_VERTICES + 0];
     struct LoadedVertex* ll = &rsp.loaded_vertices[MAX_VERTICES + 1];
@@ -1421,7 +1515,9 @@ static void gfx_dp_fill_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t
         }
         f3d_log_once(rdp.combine_mode ^ ((uint64_t)rdp.other_mode_l << 32), "[fast3d] 1/2-cycle fillrect: combine=%07x:%07x omL=%08x prim=%08x\n",
                      (uint32_t)(rdp.combine_mode >> 28), (uint32_t)rdp.combine_mode & 0xFFFFFFF, rdp.other_mode_l, 0, 0, 0, 0);
+        rect_is_fill = true;
         gfx_draw_rectangle(ulx, uly, lrx, lry);
+        rect_is_fill = false;
         return;
     }
 
@@ -1432,7 +1528,9 @@ static void gfx_dp_fill_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t
 
     uint64_t saved_combine_mode = rdp.combine_mode;
     gfx_dp_set_combine_mode(cc_only(4 /*SHADE*/, 4 /*SHADE alpha*/));
+    rect_is_fill = true;
     gfx_draw_rectangle(ulx, uly, lrx, lry);
+    rect_is_fill = false;
     rdp.combine_mode = saved_combine_mode;
 }
 
@@ -1557,13 +1655,33 @@ static int gfx_run_ex(const Gfx *cmd) {
         case 0x04: { // G_EX_SETVIEWPORT: origin here, Vp address in word 2
             Vp_t vp;
             f3d_read_vp(g_rdram, (uint32_t)((const uint8_t *)seg_addr(cmd[1].words.w1) - g_rdram), &vp);
-            gfx_calc_and_set_viewport(&vp);
+            gfx_calc_and_set_viewport(&vp, (int)(cmd->words.w1 & 0xFFF));
             return 2;
         }
         case 0x34: { // G_EX_SETFOGFLOAT (recomp addition): fog = z / w * mul + offset in G_MW_FOG units, as floats
             uint32_t mul_bits = (uint32_t)cmd[1].words.w0, offset_bits = (uint32_t)cmd[1].words.w1;
             memcpy(&rsp.fog_mul, &mul_bits, sizeof(float));
             memcpy(&rsp.fog_offset, &offset_bits, sizeof(float));
+            return 2;
+        }
+        case 0x06: { // G_EX_SETRECTALIGN: origins here, then the quarter pixel offsets of ulx/uly and lrx/lry
+            const uint32_t w1 = (uint32_t)cmd->words.w1;
+            rect_align.lorigin = (uint16_t)(w1 & 0xFFF);
+            rect_align.rorigin = (uint16_t)((w1 >> 12) & 0xFFF);
+            rect_align.off[0] = (int16_t)(cmd[1].words.w0 >> 16);
+            rect_align.off[1] = (int16_t)(cmd[1].words.w0 & 0xFFFF);
+            rect_align.off[2] = (int16_t)(cmd[1].words.w1 >> 16);
+            rect_align.off[3] = (int16_t)(cmd[1].words.w1 & 0xFFFF);
+            rect_align.active = !(rect_align.lorigin == EX_ORIGIN_NONE && rect_align.rorigin == EX_ORIGIN_NONE &&
+                                  rect_align.off[0] == 0 && rect_align.off[1] == 0 && rect_align.off[2] == 0 && rect_align.off[3] == 0);
+            return 2;
+        }
+        case 0x05: { // G_EX_SETSCISSOR: origins here, then ulx/uly and lrx/lry in quarter pixels relative to them
+            const uint32_t w1 = (uint32_t)cmd->words.w1;
+            const uint16_t lo = (uint16_t)((w1 >> 2) & 0xFFF), ro = (uint16_t)((w1 >> 14) & 0xFFF);
+            const float s = game_scale();
+            gfx_set_scissor_px(align_x_px(lo, (int16_t)(cmd[1].words.w0 >> 16)), (int16_t)(cmd[1].words.w0 & 0xFFFF) / 4.0f * s,
+                               align_x_px(ro, (int16_t)(cmd[1].words.w1 >> 16)), (int16_t)(cmd[1].words.w1 & 0xFFFF) / 4.0f * s);
             return 2;
         }
         case 0x15: gfx_ex_stack(EXS_VIEWPORT, true); return 1;
@@ -1588,7 +1706,7 @@ static int gfx_run_ex(const Gfx *cmd) {
         case 0x2A: gfx_ex_stack(EXS_GEOM, false); return 1;
         // Consumed and ignored; the word counts are those of the gEX* macros in rt64_extended_gbi.h.
         case 0x02: case 0x08: return 3;                                          // texture rectangle, scissor align
-        case 0x05: case 0x06: case 0x07: case 0x0C: case 0x13: case 0x14: case 0x31: return 2; // scissor, rect/viewport align, matrix group, edit group, vertex, vertex segment
+        case 0x07: case 0x0C: case 0x13: case 0x14: case 0x31: return 2; // scissor, rect/viewport align, matrix group, edit group, vertex, vertex segment
         default:
             if (id >= 0x38) {
                 dbg_count_unknown();
@@ -2046,6 +2164,13 @@ void gfx_init_embedded(struct GfxRenderingAPI *rapi, uint8_t *rdram) {
     gfx_rapi->init();
 }
 
+// The game's image is width x height pixels at (x, y) in the window (GL's origin): the bars around it stay black.
+void gfx_set_game_area(int x, int y, uint32_t width, uint32_t height) {
+    game_area_x = x;
+    game_area_y = y;
+    gfx_set_dimensions(width, height);
+}
+
 void gfx_set_dimensions(uint32_t width, uint32_t height) {
     gfx_current_dimensions.width = width;
     gfx_current_dimensions.height = height != 0 ? height : 1; // avoid division by zero
@@ -2066,6 +2191,8 @@ void gfx_run_task(uint32_t dl_addr) {
     dbg.stat_tasks++;
     dbg_dump_task(dl_addr & 0x1FFFFFFF);
     gfx_sp_reset();
+    memset(&rect_align, 0, sizeof(rect_align));
+    view_squeezed = true;
     memset(g_segments, 0, sizeof(g_segments));
     dl_depth = 0;
     dl_cmd_budget = 16u * 1024u * 1024u;
@@ -2081,8 +2208,8 @@ void gfx_reapply_state(void) {
     gfx_rapi->set_depth_mask(rendering_state.depth_mask);
     gfx_rapi->set_zmode_decal(rendering_state.decal_mode);
     gfx_rapi->set_use_alpha(rendering_state.alpha_blend);
-    gfx_rapi->set_viewport(rendering_state.viewport.x, rendering_state.viewport.y, rendering_state.viewport.width, rendering_state.viewport.height);
-    gfx_rapi->set_scissor(rendering_state.scissor.x, rendering_state.scissor.y, rendering_state.scissor.width, rendering_state.scissor.height);
+    gfx_apply_viewport(&rendering_state.viewport);
+    gfx_apply_scissor(&rendering_state.scissor);
     if (rendering_state.shader_program != NULL) {
         gfx_rapi->load_shader(rendering_state.shader_program); // program, attribute pointers, uniforms
     }
