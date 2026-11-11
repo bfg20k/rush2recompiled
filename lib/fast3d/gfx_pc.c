@@ -169,6 +169,7 @@ static void dbg_note_draw(size_t tris);
 static void dbg_note_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry);
 
 // Debugging (replay tool): RUSH2_F3D_DRAW_RANGE=a,b draws only flushes number a..b-1 of the frame (read once).
+static uint64_t dbg_last_cc_id;
 static int dbg_range_lo = -1, dbg_range_hi = -1, dbg_flush_no = 0;
 
 static void gfx_flush(void) {
@@ -184,9 +185,17 @@ static void gfx_flush(void) {
         }
         const int no = dbg_flush_no++;
         if (getenv("RUSH2_F3D_FLUSH_VERTS") != NULL && buf_vbo_len >= 8) {
+            if (getenv("RUSH2_F3D_FLUSH_VERTS")[0] == '2') {
+                const size_t per = buf_vbo_len / (buf_vbo_num_tris * 3);
+                fprintf(stderr, "[fast3d] flush %d vertex floats (%zu each):", no, per);
+                for (size_t k = 0; k < per; k++) fprintf(stderr, " %.3f", buf_vbo[k]);
+                fprintf(stderr, "\n");
+            }
+            fprintf(stderr, "[fast3d] flush %d shader id %016llx alpha_blend %d\n", no, (unsigned long long)dbg_last_cc_id, (int)rendering_state.alpha_blend);
             fprintf(stderr, "[fast3d] flush %d: tris=%zu first vertex x=%.3f y=%.3f z=%.3f w=%.3f viewport %d,%d %dx%d scissor %d,%d %dx%d\n", no, buf_vbo_num_tris, buf_vbo[0], buf_vbo[1], buf_vbo[2], buf_vbo[3],
                     rendering_state.viewport.x, rendering_state.viewport.y, rendering_state.viewport.width, rendering_state.viewport.height,
                     rendering_state.scissor.x, rendering_state.scissor.y, rendering_state.scissor.width, rendering_state.scissor.height);
+            fprintf(stderr, "[fast3d]   alpha_blend=%d depth_test=%d depth_mask=%d floats/vertex=%zu\n", (int)rendering_state.alpha_blend, (int)rendering_state.depth_test, (int)rendering_state.depth_mask, buf_vbo_len / (buf_vbo_num_tris * 3));
         }
         if (dbg_range_hi == -1 || (no >= dbg_range_lo && no < dbg_range_hi)) {
             gfx_rapi->draw_triangles(buf_vbo, buf_vbo_len, buf_vbo_num_tris);
@@ -794,6 +803,7 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     if (texture_edge) cc_id |= SHADER_OPT_TEXTURE_EDGE;
     if (use_noise) cc_id |= SHADER_OPT_NOISE;
     
+    dbg_last_cc_id = cc_id;
     struct ColorCombiner *comb = gfx_lookup_or_create_color_combiner(cc_id);
     struct ShaderProgram *prg = comb->prg;
     if (prg != rendering_state.shader_program) {
@@ -1364,6 +1374,8 @@ static void gfx_dp_fill_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t
             struct LoadedVertex* v = &rsp.loaded_vertices[i];
             v->color.r = v->color.g = v->color.b = v->color.a = 1.0f;
         }
+        f3d_log_once(rdp.combine_mode ^ ((uint64_t)rdp.other_mode_l << 32), "[fast3d] 1/2-cycle fillrect: combine=%07x:%07x omL=%08x prim=%08x\n",
+                     (uint32_t)(rdp.combine_mode >> 28), (uint32_t)rdp.combine_mode & 0xFFFFFFF, rdp.other_mode_l, 0, 0, 0, 0);
         gfx_draw_rectangle(ulx, uly, lrx, lry);
         return;
     }
@@ -2026,6 +2038,7 @@ void gfx_reapply_state(void) {
     gfx_rapi->set_use_alpha(rendering_state.alpha_blend);
     gfx_rapi->set_viewport(rendering_state.viewport.x, rendering_state.viewport.y, rendering_state.viewport.width, rendering_state.viewport.height);
     gfx_rapi->set_scissor(rendering_state.scissor.x, rendering_state.scissor.y, rendering_state.scissor.width, rendering_state.scissor.height);
+            fprintf(stderr, "[fast3d]   alpha_blend=%d depth_test=%d depth_mask=%d floats/vertex=%zu\n", (int)rendering_state.alpha_blend, (int)rendering_state.depth_test, (int)rendering_state.depth_mask, buf_vbo_len / (buf_vbo_num_tris * 3));
     if (rendering_state.shader_program != NULL) {
         gfx_rapi->load_shader(rendering_state.shader_program); // program, attribute pointers, uniforms
     }

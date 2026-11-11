@@ -356,7 +356,9 @@ bool gfx_opengl_build_glsl(uint64_t shader_id, enum GfxGLSLFlavor flavor, struct
     }
     sb_line(&fs, "vec4 texel = combined;");
     if (cc.opt_texture_edge && need_alpha) {
-        sb_line(&fs, "if (texel.a > 0.3) texel.a = 1.0; else discard;");
+        // An alpha cutout. With framebuffer blending the surviving alpha is the translucency (the pause dim, HUD fades),
+        // so only the opaque modes snap it to 1.
+        sb_line(&fs, cc.opt_alpha ? "if (texel.a <= 0.3) discard;" : "if (texel.a > 0.3) texel.a = 1.0; else discard;");
     }
     if (cc.opt_fog) {
         sb_line(&fs, "texel.rgb = mix(texel.rgb, vFog.rgb, vFog.a);");
