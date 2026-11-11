@@ -65,6 +65,7 @@
 #include "track2049_convert.h"
 #include "track_cache.h"
 #include "car2049.h"
+#include "collectibles.h"
 #include "rush2049_rom.h"
 #include "track_mod_runtime.h"
 #include "sim_run.h"
@@ -110,9 +111,16 @@ namespace {
     std::atomic_int applied_slot = -1; // `slot` while applied, or -1.
     std::atomic_bool applied_road_hold = false; // A custom track whose track.toml asks for road_hold is applied.
     std::atomic_bool applied_random_song = false; // A custom track without [audio] music is applied.
+    std::atomic_int applied_mod = -1;  // The custom track (track_mod index) applied, or -1.
     std::atomic_bool applied_smooth = false;    // A custom track racing with smooth collision is applied.
     std::atomic_bool applied_p2p = false;       // A point-to-point custom track is applied.
     std::atomic<float> applied_smooth_fold = 20.0f; // Its fold angle (degrees).
+    std::atomic_bool applied_smooth_height = false; // Its averaged road height ([track] smooth_height).
+    std::atomic_uint32_t applied_car_light = 0;     // Its [look] car_light as 0xRRGGBBFF, 0 for none.
+    std::atomic<float> applied_air_gravity = 1.0f;  // Its [handling] air_gravity, 1 for none.
+    std::atomic_bool applied_stunts = false;        // Its [track] stunts.
+    std::mutex traction_mutex;
+    std::vector<std::array<float, 2>> applied_traction; // Its [handling] traction steps (mph, factor), under traction_mutex.
     rush2::track2049::ConvertedTrack track;
     bool track_has_sky = false;        // The converted geometry has a SKYO1 model.
     std::set<std::string> shared_models;   // Rush 2's shared model names, read once.
@@ -408,6 +416,18 @@ namespace {
         if (is_cs_k(loaded_track)) {
             rush2::track1::set_redirects(rdram, cs_track.record_models, cs_track.piece_models);
         }
+        else if (int course = is_mod_k(loaded_track) ? rush2::collectibles::raced_arcade_course() : -1;
+                 rush2::collectibles::key_course(course)) {
+            // An arcade or PS1 version of an SF Rush course, or the PS1's Chinatown: its keys
+            // (src/arcade2049/arcade_collectibles.cpp; KEYP1-4 the PS1's own) draw SF Rush's key and are taken by SF
+            // Rush's hit test, as on the course itself.
+            std::map<std::string, std::string> keys;
+            if (course < rush2::collectibles::sfrush_courses) {
+                for (int n = 1; n <= rush2::collectibles::sfrush_keys[size_t(course)]; n++) keys["KEY" + std::to_string(n)] = "KEYL1";
+            }
+            for (int n = 1; n <= rush2::collectibles::ps1_keys; n++) keys["KEYP" + std::to_string(n)] = "KEYL1";
+            rush2::track1::set_redirects(rdram, keys, {}, true);
+        }
         else {
             rush2::track1::clear_redirects();   // another track replaced a Cal Speed one in the slot
         }
@@ -415,9 +435,22 @@ namespace {
         applied_slot = slot;
         applied_road_hold = is_mod_k(loaded_track) && mod_settings.road_hold;
         applied_random_song = is_mod_k(loaded_track) && !mod_song_set();
+        applied_mod = is_mod_k(loaded_track) ? loaded_track - mod_k : -1;
         applied_smooth = is_mod_k(loaded_track) && mod_settings.smooth_collision;
         applied_p2p = is_mod_k(loaded_track) && mod_settings.point_to_point && !rush2::track_mod::is_arena(mod_settings);
         applied_smooth_fold = mod_settings.smooth_fold;
+        applied_smooth_height = mod_settings.smooth_height;
+        const bool mod = is_mod_k(loaded_track);
+        applied_car_light = mod && mod_settings.car_light
+            ? (uint32_t((*mod_settings.car_light)[0]) << 24) | (uint32_t((*mod_settings.car_light)[1]) << 16) |
+                  (uint32_t((*mod_settings.car_light)[2]) << 8) | 0xFFu
+            : 0u;
+        applied_air_gravity = mod ? mod_settings.air_gravity : 1.0f;
+        applied_stunts = mod && mod_settings.stunts;
+        {
+            std::lock_guard lock{ traction_mutex };
+            applied_traction = mod ? mod_settings.traction : std::vector<std::array<float, 2>>{};
+        }
     }
 
     void restore(uint8_t* rdram) {
@@ -441,13 +474,21 @@ namespace {
             MEM_W(0, (int32_t)(demo_lists + (slot + 12 * b) * 4)) = saved.demo_list[b];
             MEM_H(0, (int32_t)(demo_counts + (slot + 12 * b) * 2)) = saved.demo_count[b];
         }
-        if (is_cs_k(loaded_track)) {
+        if (is_cs_k(loaded_track) || is_mod_k(loaded_track)) {
             rush2::track1::clear_redirects();
         }
         applied = false;
         applied_slot = -1;
         applied_road_hold = false;
+        applied_car_light = 0;
+        applied_air_gravity = 1.0f;
+        applied_stunts = false;
+        {
+            std::lock_guard lock{ traction_mutex };
+            applied_traction.clear();
+        }
         applied_random_song = false;
+        applied_mod = -1;
         applied_smooth = false;
         applied_p2p = false;
     }
@@ -476,6 +517,10 @@ void rush2::track2049::restore_host(uint8_t* rdram) {
 
 int rush2::track2049::race_track() {
     return raced_track;
+}
+
+bool rush2::track2049::race_track_disc() {
+    return raced_disc;
 }
 
 void rush2::track2049::set_race_track(int k, bool disc) {
@@ -524,10 +569,22 @@ bool rush2::track2049::converted_race(uint8_t* rdram) {
     return s >= 0 && MEM_BU(0, (int32_t)track_id) == s;
 }
 
-bool rush2::track2049::mod_smooth_collision(uint8_t* rdram, float* fold) {
+// A night track's fog fades to black: Rush 2049's race tracks 4 and 6 (Presidio) and its stunt and battle arenas set
+// (0, 0, 0) (main's table 0x80114658, 3 bytes per track: the day tracks are gray-blue, luminance 0.55-0.61), the
+// PlayStation SF Rush's night versions #080808. Under 0.1 luminance counts.
+bool rush2::track2049::night_race(uint8_t* rdram) {
+    if (!converted_race(rdram)) return false;
+    int s = MEM_BU(0, (int32_t)track_id);
+    float r = MEM_BU(0, (int32_t)(fog_colours + s * 3)), g = MEM_BU(0, (int32_t)(fog_colours + s * 3 + 1)),
+          b = MEM_BU(0, (int32_t)(fog_colours + s * 3 + 2));
+    return (0.299f * r + 0.587f * g + 0.114f * b) / 255.0f < 0.1f;
+}
+
+bool rush2::track2049::mod_smooth_collision(uint8_t* rdram, float* fold, bool* height) {
     int s = applied_slot;
     if (!applied_smooth || s < 0 || MEM_BU(0, (int32_t)track_id) != s) return false;
     if (fold) *fold = applied_smooth_fold;
+    if (height) *height = applied_smooth_height;
     return true;
 }
 
@@ -536,9 +593,47 @@ bool rush2::track2049::mod_random_song(uint8_t* rdram) {
     return applied_random_song && s >= 0 && MEM_BU(0, (int32_t)track_id) == s;
 }
 
+int rush2::track2049::raced_mod(uint8_t* rdram) {
+    int s = applied_slot;
+    return s >= 0 && MEM_BU(0, (int32_t)track_id) == s ? applied_mod.load() : -1;
+}
+
 bool rush2::track2049::mod_point_to_point(uint8_t* rdram) {
     int s = applied_slot;
     return applied_p2p && s >= 0 && MEM_BU(0, (int32_t)track_id) == s;
+}
+
+uint32_t rush2::track2049::mod_car_light(uint8_t* rdram) {
+    int s = applied_slot;
+    return s >= 0 && MEM_BU(0, (int32_t)track_id) == s ? applied_car_light.load() : 0u;
+}
+
+float rush2::track2049::mod_traction(uint8_t* rdram, float mph) {
+    int s = applied_slot;
+    if (s < 0 || MEM_BU(0, (int32_t)track_id) != s) return 1.0f;
+    std::lock_guard lock{ traction_mutex };
+    float factor = 1.0f;
+    for (const auto& step : applied_traction) {
+        if (mph >= step[0]) factor = step[1];
+    }
+    return factor;
+}
+
+float rush2::track2049::mod_air_gravity(uint8_t* rdram) {
+    int s = applied_slot;
+    return s >= 0 && MEM_BU(0, (int32_t)track_id) == s ? applied_air_gravity.load() : 1.0f;
+}
+
+bool rush2::track2049::mod_stunts(uint8_t* rdram) {
+    int s = applied_slot;
+    return applied_stunts && s >= 0 && MEM_BU(0, (int32_t)track_id) == s;
+}
+
+// The stunt panel's two tests of the Stunts on All Tracks cheat byte (0x8010C200, loaded into $a1, nonzero = shown):
+// hud_stunt_box_visible_80060E34 at 0x80060E7C and hud_widget_text_cb_player_stats_800B7654 at 0x800B76B0, right
+// after the load. A custom track with [track] stunts reads as the cheat set; the byte itself is left alone.
+extern "C" void rush2_track_mod_stunts(uint8_t* rdram, recomp_context* ctx) {
+    if (rush2::track2049::mod_stunts(rdram)) ctx->r5 = 1;
 }
 
 bool rush2::track2049::mod_road_hold(uint8_t* rdram) {
@@ -1024,13 +1119,14 @@ static void path_race_time(uint8_t* rdram) {
     }
     bool mod = hosting_mod(rdram);
     // A custom track with times in its track.toml: start_time is the clock at the start and also what crossing the
-    // finish line adds; checkpoint_time[n - 1] is what CHECKPOINT_n adds on lap 1 and on later laps (Rush 2 has no
+    // finish line adds (finish_time instead when it's set); checkpoint_time[n - 1] is what CHECKPOINT_n adds on lap 1 and on later laps (Rush 2 has no
     // separate lap 3+ time). The author's times stand (forward; a backward race's checkpoints come in the other order).
     if (mod && mod_settings.start_time && MEM_B(0, (int32_t)backward) == 0) {
         int16_t start = (int16_t)std::lround(*mod_settings.start_time);
         MEM_H(0, (int32_t)header) = start;
-        MEM_H(0, (int32_t)(header + 0xC + 0x1E)) = start;
-        MEM_H(0, (int32_t)(header + 0xC + 0x20)) = start;
+        int16_t finish = mod_settings.finish_time ? (int16_t)std::lround(*mod_settings.finish_time) : start;
+        MEM_H(0, (int32_t)(header + 0xC + 0x1E)) = finish;
+        MEM_H(0, (int32_t)(header + 0xC + 0x20)) = finish;
         for (int i = 1; i < count && i - 1 < (int)mod_settings.checkpoint_time.size(); i++) {
             const auto& t = mod_settings.checkpoint_time[i - 1];
             MEM_H(0, (int32_t)(header + 0xC + i * 0x50 + 0x1E)) = (int16_t)std::lround(t[0]);

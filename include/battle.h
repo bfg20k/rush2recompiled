@@ -84,6 +84,9 @@ namespace rush2::battle {
     // context, whose stack is borrowed below its stack pointer. Used by src/arcade2049/arcade_checkpoints.cpp.
     bool checkpoint_lane_middle(uint8_t* rdram, int c, float out[3]);
     bool ground_under(uint8_t* rdram, recomp_context* ctx, const float p[3], float& ground_y, float up[3]);
+    // The pose car `car`'s body is drawn with this frame: its scene node's transform (the physics pose until it has
+    // one), position in feet and rows right, up, forward. Used by src/car_lights.cpp.
+    void car_body_pose(uint8_t* rdram, int car, float pos[3], float m[9]);
 }
 
 #endif

@@ -2144,12 +2144,12 @@ ref = "docs/menus.md#no-controllers-marquee"
 
 [[var]]
 vram = 0x800BD42C
-name = "circuit_gen_word_a"
-type = "u32"
-desc = "Word read by circuit_generate. (low confidence)"
+name = "circuit_drone_skill_rows"
+type = "s32[8][14]"
+desc = "The computer cars' skill rows (values 0-6, row 7 all 0): circuit_generate copies one row to each car's 14 standings skill entries (0x800D3B28 + car x 0x58 + 0x3C: courses 0-6 forward, then backward) and shuffles them; rubber_band scales a drone's pace in a circuit by skill / 3 + 0.75."
 area = "race"
-status = "inferred"
-ref = "docs/functions/rush2_globals.md#rush-2-global-variables"
+status = "verified"
+ref = "docs/npc_cars.md#circuit-skill"
 
 [[var]]
 vram = 0x800BD430
@@ -5419,6 +5419,15 @@ status = "verified"
 ref = "docs/game_fixes.md#pause-menu-extras"
 
 [[var]]
+vram = 0x800D3B28
+name = "circuit_standings"
+type = "u8[8][0x58]"
+desc = "Circuit standings, 0x58 bytes a car: +1 overall place, +2 points (u16), +4 + race place in each race, +0x20 + race points in it, +0x3C 14 s16 skill entries (course + 7 x backward, courses 0-6; from 0x800BD42C). rubber_band reads the skill of the raced course in a circuit; the hook at 0x800A2358 keeps courses 7-10 raced backward within the car's 14 (src/circuit.cpp)."
+area = "race"
+status = "verified"
+ref = "docs/npc_cars.md#circuit-skill"
+
+[[var]]
 vram = 0x800D3B29
 name = "save_settings_byte"
 type = "u8"
@@ -5431,7 +5440,7 @@ ref = "docs/functions/rush2_globals.md#rush-2-global-variables"
 vram = 0x800D3B2A
 name = "circuit_gen_halfword"
 type = "s16"
-desc = "Halfword set by circuit generate, saved/loaded with settings to pak."
+desc = "Car 0's circuit points (standings 0x800D3B28 + 2), set by circuit generate, saved/loaded with settings to pak."
 area = "save"
 status = "inferred"
 ref = "docs/functions/rush2_globals.md#rush-2-global-variables"
@@ -9670,7 +9679,7 @@ ref = "docs/players4.md#sky-in-split-screen"
 vram = 0x8010BC98
 name = "race_deaths"
 type = "s8"
-desc = "DEATHS option for the race (track select struct 0x800D5760 + 0x11, copied by func_80094698 at 0x80094974; 0 off). Read by car_wreck_trigger, race_car_finish_or_respawn_handle (out of deaths ranks the car behind the finishers), record stats, the skull HUD widget and the options text. In a circuit, from the circuit block +1 bit 1 instead."
+desc = "DEATHS option for the race (track select struct 0x800D5760 + 0x11, copied by func_80094698 at 0x80094974; 0 off). Read by car_wreck_trigger, race_car_finish_or_respawn_handle (out of deaths ranks the car behind the finishers), record stats, the skull HUD widget and the options text. In a circuit, from the circuit block +1 bit 1 instead. Every test of it is zero / non-zero, so 2 is the port's DEATHS EXPLOSIVE (one life and a speed bomb, src/explosive.cpp, docs/sfrush_ps1.md#explosive-mode; in a circuit from the circuit's record)."
 area = "race"
 status = "verified"
 ref = "docs/game_fixes.md#finish-place-and-deaths"
@@ -10201,7 +10210,7 @@ ref = "docs/functions/rush2_globals.md#rush-2-global-variables"
 vram = 0x8010C040
 name = "race_countdown_sign"
 type = "u32[2]"
-desc = "Per view: the countdown sign polygon (CNTDWNn texture) made and placed by race_countdown_update; 0 when none."
+desc = "Per view: the countdown sign polygon (CNTDWNn texture) made and placed by race_countdown_update; 0 when none. Moved to 0x80240340 (4 entries) by src/players4.cpp, so read it there. The polygon is created with flag 0x8000 (skipped by view_fog_setup's polygon loop) and the flag is cleared once it is placed. The Rocket ZX flames draw just before it (src/rush2049/car2049.cpp)."
 area = "race"
 status = "inferred"
 ref = "docs/functions/rush2_globals.md#rush-2-global-variables"
@@ -10516,10 +10525,10 @@ ref = "docs/functions/rush2_globals.md#rush-2-global-variables"
 vram = 0x8010C15C
 name = "track_placement_state"
 type = "u32"
-desc = "Word reset at heap/scene reset and track load, used by placement find/walk and PVS (low confidence)."
+desc = "Pointer to the track's placement records (0x64 bytes each): the first top-level record, and the base record indices are taken from. pvs_choose_camera_region walks the top-level next chain (+0x44) from it; section i is the i-th record, name at +0x00."
 area = "track"
-status = "inferred"
-ref = "docs/functions/rush2_globals.md#rush-2-global-variables"
+status = "verified"
+ref = "docs/rush2049_research/geometry.md#52-pvs-which-sections-are-drawn"
 
 [[var]]
 vram = 0x8010C160
@@ -10651,9 +10660,9 @@ ref = "docs/functions/rush2_globals.md#rush-2-global-variables"
 vram = 0x8010C17B
 name = "settings_checkpoint_option"
 type = "u8"
-desc = "Setting byte copied to race globals, read by checkpoint_passed and options text (low confidence)."
+desc = "CHECKPOINTS for the race (track select struct 0x800D5760 + 0x19, copied by func_80094698 at 0x800949AC; 1 in a circuit): nonzero races against the clock, checkpoint_passed adding each checkpoint's time. Read by checkpoint_passed (0x8008F5E0), the race start timer (0x800AEAB8) and the options text, all zero / non-zero, so 2 is the port's CHECKPOINTS CLOCKS (Time Sprint: the clocks give the time, src/time_sprint.cpp, docs/sfrush_ps1.md#time-sprint)."
 area = "race"
-status = "inferred"
+status = "verified"
 ref = "docs/functions/rush2_globals.md#rush-2-global-variables"
 
 [[var]]
@@ -10678,7 +10687,7 @@ ref = "docs/rush2049_research/cars.md#paint-colors-v"
 vram = 0x8010C200
 name = "cheat_option_l"
 type = "u8"
-desc = "Cheat menu toggle byte, read by HUD menu widgets init and player stats HUD."
+desc = "The Stunts on All Tracks cheat (src/cheats.cpp, cheat_stunts_all_tracks): nonzero shows the stunt panel in a race; read by hud_stunt_box_visible_80060E34 and hud_widget_text_cb_player_stats_800B7654, where a custom track's [track] stunts reads it as set (rush2_track_mod_stunts, docs/sfrush_ps1.md#stunt-track), and by the cheats menu."
 area = "menu"
 status = "inferred"
 ref = "docs/functions/rush2_globals.md#rush-2-global-variables"
@@ -10687,7 +10696,7 @@ ref = "docs/functions/rush2_globals.md#rush-2-global-variables"
 vram = 0x8010C204
 name = "race_time_float"
 type = "f32"
-desc = "Float race time/clock reset at race start/end and updated by checkpoints, read by 13 HUD/race functions (low confidence)."
+desc = "Float race time/clock reset at race start/end and updated by checkpoints, read by 13 HUD/race functions (low confidence). The time allowed: checkpoint_passed adds each checkpoint's bonus to it (0x8008F690), and Time Sprint's clocks add 20 s each (src/time_sprint.cpp, docs/sfrush_ps1.md#time-sprint)."
 area = "race"
 status = "inferred"
 ref = "docs/functions/rush2_globals.md#rush-2-global-variables"

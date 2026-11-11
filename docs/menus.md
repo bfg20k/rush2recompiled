@@ -126,7 +126,11 @@ was). A course whose other versions are locked (Metro, Mission, Presidio before 
 shows its arcade version and still names it; `--config cheats.unlock_all_tracks=true` opens them for a test run
 (src/rush2049/track2049_menu.cpp `rush2_track49_filter_frame`, drawn by `rush2::game_filter::draw`). The pick is saved
 per course in the saves' "track_select" section ("versions") and the screen is rebuilt as after a filter change, on
-the new version. `RUSH2_TEST_TRACK=ID` with a course's other version opens on that version (picked for the run).
+the new version. `RUSH2_TEST_TRACK=ID` with a course's other version opens on that version (picked for the run). The rebuild happens in the switch's own frame (teardown, then the game's own func_803AB294(1) builds and draws),
+so no frame goes without the screen, and a carousel slide in progress carries on: each entry's distance from its
+target (+0x4 x minus +0x10 target, by display index) and the highlight's x (0x803CB40C) are put back after the build
+(hook 0x803AB9B8, `rush2_track49_carousel_restore`). Carousel entry (0x1C bytes): +0x0 track, +0x4/+0x8/+0xC position,
++0x10 target x, +0x14 place, +0x18 model node; each frame every entry moves by the shown entry's (target - x) / 10 * dt * 30.
 
 Each version's preview has a thin ring around the round picture in its version's color: N64 blue, DC orange, ARCADE
 red (`version_ring_*`, include/track2049.h). The ring shows only when the X prompt names the version
@@ -195,7 +199,13 @@ up, for a script through the real menus (it starts as JUST PLAY: the folder has 
 
 To look at a spot on a track, don't hold the gas and hope: watch a drone drive the AI lanes there,
 `tools/test_race.py TRACK --drones 1 --env RUSH2_TEST_RACE_VIEW_CAR=1 --env RUSH2_TEST_RACE_VIEW_LANE=1` (the view on
-drone 1, kept to lane 1 of 0-3, left to right), with `--shots` as it passes.
+drone 1, kept to lane 1 of 0-3, left to right), with `--shots` as it passes. `--env RUSH2_TEST_RACE_VIEW_MODE=1`
+puts that camera in the hood view (0 bumper, 1 hood, 2 and 3 chase; docs/camera.md), as a player's screenshot from
+the hood or bumper camera shows the spot.
+
+`--env RUSH2_TEST_RACE_FINISH_BANNER=1` turns the finish banner to FINISH as the race starts (Rush 2's last-lap swap,
+which otherwise needs a player past the last checkpoint of the last lap). The grid is under or past most banners, so
+watch a drone come back to it at the end of lap 1.
 
 - `RUSH2_TEST_RACE_CARS=T[,T...]`: one car type per player, 1 to 4 players (split screen). View p follows car p
   (`view_cars` 0x80240380, as online sets them): left unset, view 0 kept another car and split screen's first view

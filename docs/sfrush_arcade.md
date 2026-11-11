@@ -25,6 +25,8 @@ python tools/arcade2049/arcade.py %LOCALAPPDATA%\ProjectR\Data\sfrushrk\TRACKS\T
   tracks). The course's own version now shows as N64 (it showed STOCK; a saved STOCK pick of an `sfrush:` course is
   read as N64).
 - The game filter files them under SF Rush, by the mod's id (`rush2::track2049::mod_from_sfrush`).
+- They carry the N64 course's keys where the arcade track has the same spot (36 of 53; none on The Rock), taken with
+  SF Rush's hit test and shared with the N64 version: docs/arcade2049.md#coins-and-keys-on-the-arcade-versions.
 - In the track select an arcade version shows its course's diorama and banner (`write_tables`, as the Dreamcast
   versions do): the arcade data has no picture, and SF Rush's dioramas are models of the courses. A course with its
   arcade version installed shows a version band round the foot of its diorama, as the Rush 2049 previews' rings: blue
@@ -92,7 +94,11 @@ tracks 1-3) and its extents to the foot (4963 x 8967 ft against 4962 x 8966 on G
   far-object rules apply with a 12,000 ft radius for all but water (2049: 9,000): Market's road and trees reach 9,138
   ft and Embarcadero's signs 9,406, while the backdrops (Market's hills `TP_` 12,190-22,743 ft, Embarcadero's Marin hills
   and bay 16,440-18,698, The Rock's distant land `APANS_01`-`16`) go to the sky. Sky draw order: dome, water, every
-  other sky object (distant land), clouds. Downtown, The Heights and Sunset have no dome in their data (nor in
+  other sky object (distant land), clouds. An object is sky by its textures only when every triangle has a sky
+  texture: Market's TEMPL1966 (a block of road and shop fronts at about (-5400, 0) with four `SKYTOP1` triangles under
+  the road) and TEMPL880 (concrete and side road at (-2300, 2500) with a small box of `SKY00A`-`03A` and `SKYTOP1`)
+  were taken whole into the sky and drew floating overhead, leaving a hole in the street (2026-11-07); they stay
+  scenery, their sky panels drawn in place. Downtown, The Heights and Sunset have no dome in their data (nor in
   `STATIC` or `REFLECT`): they get `sky = "clouds"`, the N64 version's dome. All seven take SF Rush's fog color
   0x9696BE (`fog_color`, as the N64 port's).
 - **Water:** `WATER2` sheets become `COL_WATER` as on 2049, but only at sea level (every corner at 5 ft or below: the
@@ -144,6 +150,74 @@ Each gate goes to the lap point nearest it in 3D at or after the one before (Sun
 5th gates twice, 60 ft apart). Every gate lands within 75 ft of the lap. Sunset's 3rd and 4th gates reach the
 opposite stretch (the converter warns): a car meets that stretch only while another gate is next, so no gate is
 passed early.
+
+Each marker carries the arcade's radius as `pass_radius` (500 ft, 152.4 m), which the mod converter writes into the
+path file as the gate radius the race's gate test reads (`func_800A1468`: a change of side counts only within the
+radius seen from above), while the marker's X scale (the road's half width + 10 ft, 40-210 ft) stays where the
+converter finds the AI path's crossing. With the road's width alone (issue 57, 2026-11-07: "the tunnel shortcut
+doesn't count and the left path on top of the rooftop near the end of the lap doesn't count either" on The Rock) a
+car taking a shortcut crossed the gate's line beside it and the gate was missed, which stops the race's checkpoints,
+laps and respawn window (docs/rush2049_research/checkpoints.md#8-car-tracker-checkpoint-window-and-respawn-point-rush-2-vs-2049-vs-sf-rush).
+On The Rock the road under the bridge crosses checkpoint 2's line 43-66 ft out (its marker: 40 ft), the cell-block
+roof (ACELLTOP) 52 ft above the finish 66-157 ft out (its marker: 52 ft), and the lower road beside the climb to the
+finish up to 180 ft out. `tools/gate_pass.py` (Rush 2's gate test along every AI line, 3 laps) finds no gate counted
+on another stretch at 500 ft on any of the seven tracks; in game The Rock's drone counted checkpoints 1-6 in order.
+
+## Music
+
+Rush The Rock's music isn't recorded: its sound board (Atari CAGE style, a TMS32C031 on a 32-bit ROM bus) plays
+sequenced songs, a script per track driving a voice that plays samples from the four sound ROMs `audio.u62`, `u61`,
+`u53`, `u49` (beside the unpacked disk in ProjectR's `sfrushrk` folder; the disk itself holds no sound). The game
+synthesizes them live from those ROMs (`src/arcade2049/rock_music.cpp`, a port of ProjectR's native version of the sound
+program; `tmp/music/rtr_render.py` was the Python proof it matches sample for sample), as a song player stream
+(`src/music_streams.cpp`). Each TRACKn's song is the Original of its arcade version and is listed under SF Rush >
+Arcade in the Sound tab. Addresses below are project-r.exe (base 0x140000000) unless they are DSP addresses (ROM).
+
+**ROM** (loader 0x1401B7E80): dword k of the 8 MB image = bytes u62[2k], u62[2k+1], u61[2k], u61[2k+1] (little
+endian) for the first 4 MB, u53/u49 likewise for the second; DSP address = 0xD00000 + dword index. Floats are TMS320C3x
+(0x140243320): the top byte the signed exponent (-128: 0.0), bit 23 the sign, a 23-bit mantissa.
+
+**Samples** (parse 0x1401B8B80): 256 pointers at byte 0x7E5800, each to a record of dwords R[0..16]: R[1] format (3
+8-bit: four a dword, most significant byte first, x 256, decoder 0x1402DD650; 1 16-bit: two a dword, high half first,
+0x1402DD3E0; 5 unsupported, records 0-3), R[2] rate multiplier (float), R[3] start, R[4] length (samples), R[7]/R[8]
+loop start/end (a loop only when start < end), R[10] root key, R[13] attack and R[16] release step per block (floats,
+negative: none). Tables (DSP addresses): 0xEFC963 semitone ratios 2^((i-36)/12) (73), 0xEFC9AB cent ratios
+2^((i-100)/1200) (457), 0xEFCB74 volume i/128 (256), 0xEFC8E3 velocity i/128 (128), 0xEFCDB4 the pan lobe sin(pi i/256)
+(130).
+
+**Songs**: the sound program's command table (0x1406EB6C0, 16 bytes an entry: track list pointer, type byte at +8: 8
+start a song, 5 stop one; even commands stop the odd one before them). A track list is {next, script PC, priority,
+channel}. The game's per-track starter (0x1402303A0, table 0x14065B626) sends sound calls 0x8052, 0x8050, 0x8056, 0x80D8,
+0x8054, 0x8058, 0x805A for TRACK1-7, which the call table 0x1406E4200 ({engine, arg count, command}) turns into
+commands 27, 25, 31, 41, 29, 33, 35 (TRACK4, The Rock, has the one call out of the run). No direct caller of 0x1402303A0
+was found, so the TRACKn order is the table's, taken as the folders' [I]. Command 29's scores are command 3's. Commands 37
+(23 s, the attract fanfare, 0x805C) and 61 (154 s) play once; 43-53 are 1-3 s stingers.
+
+**Sequencer** (tick 0x14024EDB0, spawn 0x14024E810): 250 ticks a second. ProjectR runs it once per 64-sample block at
+22050 Hz (344.5 a second; the stream thread 0x14024BF10 through 0x14024C340, after that block's mix, vtable
+0x140707338 slot 2 = 0x14024FB10), which plays every song 1.378x too fast and cuts its phrase samples short. The songs'
+long phrase and loop samples (22050 Hz; the bass, sample 48, is an in-tune E1 at that rate) last exactly a whole note
+(0x3C0000) at 250 ticks, 88.2 samples a tick: Sunset's drum loop (sample 24, 70560 samples) is two whole notes, its
+guitar phrases one, and every song's phrases fit their notes the same way. The port keeps the 64-sample voice blocks
+and runs the sequencer on its own 250 Hz clock. Per tick a track's counter c20 -= tempo, and below 0 its script
+runs to the next note; c24 -= tempo, and below 0 the note releases. Instructions are an opcode and an operand dword
+(branches a third). Opcodes below 0x80 are notes (0 a rest): operand 0 returns from a call or ends the track, else its
+low 4 bits pick the duration (16.16 ticks: 0, 0x3C0000, 0x1E0000, 0xF0000, 0x78000, 0x140000, 0xA0000, 0x50000, 0xC0000,
+0x3C000, 0x1E000, 0xF000, 0x7800, 0x28000, 0x14000, 0x60000), 0x40 adds half, 0x80 ties, (A & 0x30) == 0x10 is staccato,
+(A >> 4) & 3 adds 0/0/20/40 velocity. Key = transpose + note, through the patch map (0xBC) or + 11. Other opcodes (jump
+table 0x14070C368): 0x80/0x81 tempo =/+=, 0x82/0x88/0x83 volume, 0x84/0x85 transpose, 0x8D call through a pointer cell,
+0x8E/0x8F loop start (count, 0 forever) and end, 0x99 jump, 0x9C/0xBF pan +=/=, 0x9D sample, 0xA2/0xA3 velocity,
+0xA6/0xA7 cents, 0xA9-0xAD register arithmetic, 0xAE/0xAF table jumps, 0xB0-0xBA register moves, shifts, compares and
+conditional jumps, 0xBC patch. Not ported (effects): 0x8C, 0x97, 0xA4, 0xA5/0xA8, 0x9F/0xA0, 0xC0/0xC2, reverb sends
+(0x1402DE960) and portamento.
+
+**Voices** (0x14024B2D0, render 0x1402DDBA0, envelope 0x1402DD980): 16, one a channel. Rate = semitone[key + cents/100 -
+root] x cent[cents % 100] x the sample's rate, linear interpolation; level = velocity x volume x envelope (attack ramps
+up by R[13] a block; release fades by R[16] a block, or without one the sample just stops looping). ProjectR's stereo mix
+(0x14024AA20) pans by the lobe: left = g(a + 0xC0) + 0.707 g(a + 0x140), right = g(a + 0x40) + 0.707 g(a + 0x1C0), a the pan
+angle (512 a turn). Its output level also goes through ProjectR's own volume table (0x1406EA51C, by its game_volume
+setting), so the port levels the songs by loudness instead: -4.95 LUFS as synthesized, turned down 11.15 dB to Rush 2's
+-16.1 (`rock_music_compensation`).
 
 ## Checks
 

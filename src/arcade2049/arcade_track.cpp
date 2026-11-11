@@ -316,25 +316,8 @@ namespace {
         h = dot(P - q, normal);
     }
 
-    struct FlatPoly {
-        uint32_t flags;
-        std::vector<V3> pts;
-        V3 normal;
-    };
-
-    struct FootprintTri {
-        uint32_t flags;
-        std::array<V3, 3> pts;
-        int seg;
-    };
-
-    // An arcade spline polygon kept as it is, on its own segment (spline_road: loops).
-    struct SplinePoly {
-        uint32_t flags;
-        std::vector<V3> pts;
-        V3 normal;
-        int seg;
-    };
+    // FlatPoly, FootprintTri and SplinePoly (a spline polygon kept as it is, on its own segment: loops) are in
+    // arcade_internal.h, shared with the PlayStation converter (cut_spline_road).
 
     // The arcade's spline road as the game's (ROAD_SPLINES, docs/custom_tracks.md): Rush 2 and the N64 take a spline
     // polygon's height from its segment (collision_seg_surface_8006BDA8), not from the polygon, which only marks
@@ -353,13 +336,15 @@ namespace {
     // footprint whose plane is over 5 ft off their surface.
     void spline_road_pass(const std::vector<std::array<double, 33>>& records, const std::vector<CollisionPoly>& polys,
                           const std::set<int>& no_band, std::vector<FootprintTri>& tris, std::vector<SplinePoly>& kept,
-                          std::vector<FlatPoly>& flat, std::vector<std::string>& report, std::set<int>& bad) {
+                          std::vector<FlatPoly>& flat, std::vector<std::string>& report, std::set<int>& bad,
+                          const SplineCut& cut = {}) {
         std::vector<Seg> segs;
         for (const auto& r : records) segs.emplace_back(r);
         int ns = int(segs.size());
         auto nxt = [&](int k) -> const Seg& { return segs[(k + 1) % ns]; };
 
-        // Segment k's stretch from above: its start line to its next one's, well past the road's edges (u -1.5..2.5).
+        // Segment k's stretch from above: its start line to its next one's, well past the road's edges (u -1.5..2.5;
+        // cut.u_band can set another range).
         std::vector<std::optional<Path64>> bands(ns);
         for (int k = 0; k < ns; k++) {
             if (no_band.count(k)) continue;
@@ -371,7 +356,9 @@ namespace {
                 V3 p = G.O + G.f30 * ((u - 0.5) * G.f54);
                 return V2{ p[0], p[2] };
             };
-            std::vector<V2> q{ line(S, -1.5), line(S, 2.5), line(T, 2.5), line(T, -1.5) };
+            double u0 = -1.5, u1 = 2.5;
+            if (size_t(k) < cut.u_band.size()) u0 = cut.u_band[k][0], u1 = cut.u_band[k][1];
+            std::vector<V2> q{ line(S, u0), line(S, u1), line(T, u1), line(T, u0) };
             // A valid band: no edge crosses the opposite one (a bowtie).
             auto crosses = [](V2 a, V2 b, V2 c, V2 d) {
                 auto side = [](V2 p, V2 q, V2 r) { return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]); };
@@ -413,8 +400,12 @@ namespace {
             for (const V3& q : p.pts) xz.push_back({ q[0], q[2] });
             Paths64 rest = boolean(ClipType::Union, Paths64{ to_path(xz, fine) });
             std::vector<int> ks;
-            for (int k = std::max(0, p.seg - spline_window); k < std::min(ns, p.seg + spline_window + 1); k++) ks.push_back(k);
-            std::stable_sort(ks.begin(), ks.end(), [&](int a, int b) { return std::abs(a - p.seg) < std::abs(b - p.seg); });
+            if (cut.candidates) {
+                for (int k : cut.candidates(p)) if (k >= 0 && k < ns) ks.push_back(k);
+            } else {
+                for (int k = std::max(0, p.seg - spline_window); k < std::min(ns, p.seg + spline_window + 1); k++) ks.push_back(k);
+                std::stable_sort(ks.begin(), ks.end(), [&](int a, int b) { return std::abs(a - p.seg) < std::abs(b - p.seg); });
+            }
             for (int k : ks) {
                 if (!bands[k] || rest.empty()) continue;
                 Paths64 part = boolean(ClipType::Intersection, rest, Paths64{ *bands[k] });
@@ -532,9 +523,9 @@ namespace {
     // (docs/arcade2049.md#segments-the-spline-road).
     void spline_road(const std::vector<std::array<double, 33>>& records, const std::vector<CollisionPoly>& polys,
                      std::vector<FootprintTri>& tris, std::vector<SplinePoly>& kept, std::vector<FlatPoly>& flat,
-                     std::vector<std::string>& report) {
+                     std::vector<std::string>& report, const SplineCut& cut = {}) {
         std::set<int> bad;
-        spline_road_pass(records, polys, {}, tris, kept, flat, report, bad);
+        spline_road_pass(records, polys, {}, tris, kept, flat, report, bad, cut);
     }
 
     // ----------------------------------------------------------------------------------------- crowding
@@ -1043,6 +1034,12 @@ namespace {
 
 // One arcade track (TRACKS/<folder>) as the mod's tracks/<track_id>/ (in a49, whose Vertex the body means).
 namespace rush2::arcade2049 {
+void cut_spline_road(const std::vector<std::array<double, 33>>& records, const std::vector<CollisionPoly>& polys,
+                     std::vector<FootprintTri>& tris, std::vector<SplinePoly>& kept, std::vector<FlatPoly>& flat,
+                     std::vector<std::string>& report, const SplineCut& cut) {
+    spline_road(records, polys, tris, kept, flat, report, cut);
+}
+
 static bool build_one(const ArcadeGame& game, const std::filesystem::path& data_dir, const ArcadeTrack& track,
                       const std::filesystem::path& assets_dir, ModFiles& out, std::string& log,
                       const std::function<bool()>& cancelled) {
@@ -1241,13 +1238,33 @@ static bool build_one(const ArcadeGame& game, const std::filesystem::path& data_
             for (const auto& tr : lod.tris) if (tr[3] < t.textures.size()) used.insert(tr[3]);
             for (int ti : used) { users[ti].first++; users[ti].second += far; }
         }
+        auto shared_sky = [&](int ti) {
+            auto u = users.find(ti);
+            return u != users.end() && u->second.second >= 2 && u->second.second * 2 >= u->second.first;
+        };
         for (const Instance& in : instances) {
             for (const auto& tr : in.o->lod0.tris) {
-                auto u = users.find(tr[3]);
-                if (u != users.end() && u->second.second >= 2 && u->second.second * 2 >= u->second.first) {
+                if (shared_sky(tr[3])) {
                     sky_names.insert(in.o->name);
                     break;
                 }
+            }
+        }
+        // Rush The Rock puts a few sky-textured panels inside street objects (Market's TEMPL1966: a block of road and
+        // shop fronts with four SKYTOP1 triangles under the road; TEMPL880: concrete and side road with a small box of
+        // SKY00A-03A and SKYTOP1). Taken as sky, the whole block was drawn in the sky pass, floating overhead, leaving a
+        // hole in the street (2026-11-07). On The Rock an object is sky by its textures only when every triangle is
+        // sky-textured; a mixed one stays scenery, its sky panels drawn in place (far objects are still sky by reach).
+        if (rock) {
+            const auto rock_sky = [&](int ti) {
+                if (ti >= int(t.textures.size())) return true;
+                for (const char* s : rock_sky_textures) if (starts_with(t.textures[ti].name, s)) return true;
+                return shared_sky(ti);
+            };
+            for (auto it = sky_names.begin(); it != sky_names.end();) {
+                const Object* o = t.object_named(*it);
+                bool mixed = o && std::any_of(o->lod0.tris.begin(), o->lod0.tris.end(), [&](const auto& tr) { return !rock_sky(tr[3]); });
+                it = mixed ? sky_names.erase(it) : std::next(it);
             }
         }
     }
@@ -2078,9 +2095,16 @@ static bool build_one(const ArcadeGame& game, const std::filesystem::path& data_
         last = at;
         gates.push_back({ "CHECKPOINT_" + std::to_string(++kept), i });
     }
+    // Rush The Rock's gates count a car crossing their line within 500 ft (their radius in ProjectR's tables: 250,000
+    // squared), not only across the road's width the marker is scaled to (where the converter finds the AI path's
+    // crossing): The Rock's tunnel under checkpoint 2 crosses its line 45-65 ft from the gate, the rooftop beside its
+    // finish 65-160 ft, and a gate missed there stopped the race's checkpoints and laps (issue 57).
+    // docs/sfrush_arcade.md#gates
+    constexpr double rock_gate_radius = 500.0;
     for (const auto& [gname, i] : gates) {
         V2 tg = tangent(i);
-        g.empty(gname, gate_matrix(lap[i], { tg[0], 0.0, tg[1] }, std::max({ half[i][0], half[i][1], 30.0 }) + 10.0));
+        int node = g.empty(gname, gate_matrix(lap[i], { tg[0], 0.0, tg[1] }, std::max({ half[i][0], half[i][1], 30.0 }) + 10.0));
+        if (rock) g.js["nodes"][node]["extras"] = { { "pass_radius", rock_gate_radius / feet_per_meter } };
     }
 
     // AI: every racing line the arcade gives the drones. Table 0's lap is AIPATH_main (as wide as the road there: the

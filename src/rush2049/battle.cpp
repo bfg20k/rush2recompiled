@@ -3581,3 +3581,7 @@ void rush2::battle::online_sync(rush2::online::sync::Walker& w) {
         }
     }
 }
+
+void rush2::battle::car_body_pose(uint8_t* rdram, int car, float pos[3], float m[9]) {
+    body_pose(rdram, car, pos, m);
+}

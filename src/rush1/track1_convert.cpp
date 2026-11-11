@@ -34,6 +34,7 @@
 
 #include "track1.h"
 #include "track1_banners.h"
+#include "track1_lanes.h"
 #include "track2049.h"
 #include "texture_upscale.h"
 
@@ -937,6 +938,44 @@ namespace {
             }
             sections.push_back(std::move(sec));
         }
+        // The PS1 SF Rush's keys whose spot this course has (ps1_keys.inc, from tools/arcade_collectibles.py;
+        // docs/sfrush_ps1.md#keys): KEYP1-4, made from one of the course's own keys with the PS1 key's record name and
+        // world position, each a child of the section whose origin is nearest it (the game culls it with that section).
+        struct Ps1Key {
+            int course;
+            const char* record;
+            int bit;
+            float pos[3];
+        };
+        static const Ps1Key ps1_keys[] = {
+#include "ps1_keys.inc"
+        };
+        const Bytes* key_template = nullptr;
+        for (const Section& s : sections) {
+            for (const Bytes& k : s.kids) {
+                std::string n = cname(k, 0);
+                if (key_template == nullptr && n.size() == 4 && n.compare(0, 3, "KEY") == 0 && n[3] >= '1' && n[3] <= '8') {
+                    key_template = &k;
+                }
+            }
+        }
+        std::vector<std::pair<size_t, Bytes>> ps1_kids;
+        for (const Ps1Key& pk : ps1_keys) {
+            if (pk.course != t || key_template == nullptr || sections.empty()) continue;
+            size_t best = 0;
+            double best_d = -1.0;
+            for (size_t i = 0; i < sections.size(); i++) {
+                double dx = f32(sections[i].rec, 0x34) - pk.pos[0], dz = f32(sections[i].rec, 0x3C) - pk.pos[2];
+                if (best_d < 0.0 || dx * dx + dz * dz < best_d) { best = i; best_d = dx * dx + dz * dz; }
+            }
+            Bytes k = *key_template;
+            put_name(k, 0, pk.record);
+            for (int a = 0; a < 9; a++) putf(k, 0x10 + a * 4, a % 4 == 0 ? 1.0 : 0.0);
+            for (int a = 0; a < 3; a++) putf(k, 0x34 + a * 4, double(pk.pos[a]));
+            record_models[pk.record] = names.at(r1_key_model);
+            ps1_kids.emplace_back(best, std::move(k));
+        }
+        for (auto& [i, k] : ps1_kids) sections[i].kids.push_back(std::move(k));
         // Pre-order: the section chain, then each section's children.
         size_t n_top = sections.size();
         std::vector<int> first_child;
@@ -1268,23 +1307,14 @@ namespace {
         Bytes d = asset(rom, (backward ? path_back_asset : path_asset) + t);
         std::vector<std::vector<LanePoint>> lanes;
         std::vector<size_t> loops;
-        size_t o = 0;
-        for (int l = 0; l < 4; l++) {
-            int n = s16(d, o), loop = s16(d, o + 2), end = s16(d, o + 4);
-            if (n < 0) fail("bad lane");
+        std::vector<rush2::track1::FileLane> file_lanes;
+        if (!rush2::track1::parse_lanes(d.data(), d.size(), file_lanes)) fail("bad lane file");
+        for (const auto& fl : file_lanes) {
             std::vector<LanePoint> pts;
-            for (int k = 0; k < n; k++) {
-                size_t p = o + 8 + size_t(k) * 10;
-                int c0 = s16(d, p), c1 = s16(d, p + 2), c2 = s16(d, p + 4);
-                pts.push_back({ c1, -c2, c0, lane_mph(d[p + 6]), d[p + 7] });
-            }
-            o += 8 + size_t(n) * 10;
-            if (!(2 <= end && end <= n)) end = n;
-            pts.resize(size_t(end));
-            loops.push_back(0 <= loop && loop < end ? size_t(loop) : 0);
+            for (const auto& p : fl.points) pts.push_back({ p.x, p.y, p.z, lane_mph(p.fps), p.behaviour });
+            loops.push_back(fl.loop);
             lanes.push_back(std::move(pts));
         }
-        if (o != d.size()) fail("path size mismatch");
 
         // Records: f32 x, y, z, s32 gate radius squared, s16 flags, s16 time[3] (by lap); the end record (flags -1) holds the start time's
         // base at +0x12 and the loop-start checkpoint at +0x14.
@@ -1707,9 +1737,13 @@ bool rush2::track1::extend_menu_container(const std::vector<uint8_t>& container,
             if (!i) fail(std::string("no diorama ") + diorama_models[t]);
             const std::string model = "R1TRACK" + std::to_string(t + 1);
             b.add_model(s, *i, model, false);
-            // Its version bands (shown for a course with another version: the SF Rush arcade tracks'): N64 and ARCADE.
+            // Its version bands (shown for a course with another version: the SF Rush arcade tracks', the PlayStation
+            // SF Rush's SNOW, NIGHT and STUNT): N64, ARCADE, SNOW, NIGHT and STUNT.
             add_band_model(b, model, model + "N", rush2::track2049::version_ring_n64);
             add_band_model(b, model, model + "A", rush2::track2049::version_ring_arcade);
+            add_band_model(b, model, model + "S", rush2::track2049::version_ring_snow);
+            add_band_model(b, model, model + "K", rush2::track2049::version_ring_night);
+            add_band_model(b, model, model + "T", rush2::track2049::version_ring_stunt);
             Bytes texels, palette;
             build_logo(t, texels, palette);
             b.add_texels("R1LOGO" + std::to_string(t + 1), logo_w, logo_h, 0x01, 0x02, 0x48008000, texels, palette);

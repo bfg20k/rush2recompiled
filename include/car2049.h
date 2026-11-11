@@ -149,7 +149,26 @@ namespace rush2::car2049 {
         std::vector<std::pair<uint32_t, int>> table_bytes;     // per-type byte table (Rush 2 address), every row
         int top_gear = -1;             // descriptor +0xE0
         bool tires_2049 = false;       // Rush 2049's tire curves (front, rear) in place of the base car's
+        bool wheels_hidden = false;    // "no_wheels": no wheels drawn (the PS1 SF Rush UFO), whatever TIRE SIZE says
+        bool wings_hidden = false;     // "no_wings": the wings work but aren't drawn (src/rush2049/wings_render.cpp)
+        bool marks_hidden = false;     // "no_skid_marks": its wheels lay no tire marks (src/surface_fx.cpp)
+        bool dust_hidden = false;      // "no_wheel_dust": its wheels throw no dust, smoke or spray (src/surface_fx.cpp)
+        float shadow_radius = 0.0f;    // "round_shadow": a round shadow this many feet across the middle (src/mod_car_shadow.cpp); 0: the game's
+        std::vector<uint8_t> logo;     // "logo": the car select name logo, an encoded 128 x 32 image; empty: lettered
     };
+    // What race car `car`'s brake lights are drawn from while it brakes (src/car_lights.cpp): its textures' lit copies
+    // (texels -> the lit copy, both RDRAM; the texels whose bytes differ are the lights), lit copies kept outside RDRAM
+    // (a Dreamcast car's job-less tail light textures: texels -> their lit bytes), its brake light lists (RDRAM; every
+    // triangle is a light) and whether Rush 2's own palette lighting shows on it (its CI textures' entries 161-175:
+    // false for a California Speed car, whose those entries are grays). Game thread.
+    struct BrakeLightSources {
+        std::vector<std::pair<uint32_t, uint32_t>> lit_copies;
+        std::vector<std::pair<uint32_t, std::vector<uint8_t>>> lit_bytes;
+        std::vector<uint32_t> lists;
+        bool palette = true;
+        uint32_t base = 0;   // the car copy's base (0: a Rush 2 car of its own)
+    };
+    void brake_light_sources(uint8_t* rdram, int car, BrakeLightSources& out);
     // Mod car n from the car container `car` (as set_body_car's), parts named `prefix` (at most 7 characters).
     void set_mod_car(uint8_t* rdram, int n, std::vector<uint8_t> car, const std::string& prefix,
                      const std::map<uint32_t, std::vector<uint8_t>>& scuffed, const ModCar& spec);
@@ -157,11 +176,23 @@ namespace rush2::car2049 {
     int car_index(const std::string& name);
     // Takes mod car n off the car select (its mod was turned off).
     void clear_mod_car(uint8_t* rdram, int n);
-    // Whether mod car n comes from the app's own Rush 2049 arcade car mod (rush2::arcade2049::car_mod_id, matched by
-    // the mod's id so other mods can't claim it; src/car_mods.cpp sets it with the car). Those cars list right after
-    // the 2049 cars (append_to_car_list) and the game filter files them under Rush 2049.
-    void set_mod_car_from_2049(int n, bool from_2049);
+    // The game mod car n comes from: one of the app's own mods, matched by the mod's id so other mods can't claim it
+    // (src/car_mods.cpp sets it with the car): the Rush 2049 arcade car mod (rush2::arcade2049::car_mod_id), listed
+    // right after the 2049 cars (append_to_car_list) and filed under Rush 2049, or the PlayStation SF Rush mod
+    // (rush2::sfrush_ps1::mod_id), listed after Rush 2's cars and filed under SF Rush. Other mods' cars are Custom.
+    enum class ModGame { Custom, Rush2049, SFRush };
+    void set_mod_car_game(int n, ModGame game);
     bool mod_car_from_2049(int type);
+    bool mod_car_from_sfrush(int type);
+    // Whether car type `type` is a mod car drawn without wheels (ModCar::wheels_hidden).
+    bool mod_car_wheels_hidden(int type);
+    // Car type `type`'s round shadow radius in feet (ModCar::shadow_radius), 0 for the game's own shadow.
+    float mod_car_shadow_radius(int type);
+    // Whether car type `type` is a mod car whose wings aren't drawn (ModCar::wings_hidden).
+    bool mod_car_wings_hidden(int type);
+    // Whether car type `type` is a mod car whose wheels lay no tire marks / throw no particles.
+    bool mod_car_marks_hidden(int type);
+    bool mod_car_dust_hidden(int type);
     // Every car type in the car select's order: Rush 2's, the 2049 cars, the arcade car mod's, then the Cal Speed
     // cars and the other mods' (append_to_car_list, and the unlock system's list, src/unlocks.cpp).
     std::vector<int> list_order();
@@ -275,6 +306,8 @@ namespace rush2::car2049 {
     // the road under it on a 2049 track); on a 2049 track any other car part is drawn from a copy of its list whose
     // combiners multiply by that colour (through ENV and PRIM).
     void light_model(uint8_t* rdram, recomp_context* ctx, uint32_t dl);
+    // The race car (0-7) the scene node at `node` belongs to, -1 for none (light_model's tables, built per view).
+    int model_car(uint32_t node);
 
     // Car sheen (Graphics > Car Sheen): Rush 2's translucent sheen layers over the cars. Original draws them on the
     // Rush 2 cars, All Off on none, All On on the Rush 2049 cars too (layers made from their bodies). Cube Map has

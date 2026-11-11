@@ -155,6 +155,7 @@ namespace {
         std::set<std::string> mods;    // custom tracks by folder
         std::map<int, Car> cars;
         int battle = -1;    // the race select's BATTLE row for this circuit, -1 not set yet (rush2::circuit::race_battle)
+        int explosive = -1; // DEATHS' EXPLOSIVE value for this circuit, -1 not set yet (rush2::circuit::explosive)
         std::map<int, RaceTrack> tracks;   // by race index (rush2::circuit::recorded_race)
     };
 
@@ -199,6 +200,9 @@ namespace {
                 }
             }
             if (e.contains("battle") && e["battle"].is_number_integer()) s.battle = e["battle"].get<int>() != 0 ? 1 : 0;
+            if (e.contains("explosive") && e["explosive"].is_number_integer()) {
+                s.explosive = e["explosive"].get<int>() != 0 ? 1 : 0;
+            }
             // tracks: [race, track id or custom track folder, direction bits] each.
             if (e.contains("tracks") && e["tracks"].is_array()) {
                 for (const auto& r : e["tracks"]) {
@@ -231,6 +235,7 @@ namespace {
                                  { "mods", nlohmann::json(std::vector<std::string>(s.mods.begin(), s.mods.end())) },
                                  { "cars", cars } };
             if (s.battle >= 0) e["battle"] = s.battle;   // older records have none: set at the next track select
+            if (s.explosive >= 0) e["explosive"] = s.explosive;   // none before EXPLOSIVE: the menu's DEATHS decides
             if (!s.tracks.empty()) {
                 nlohmann::json tracks = nlohmann::json::array();
                 for (const auto& [race, rt] : s.tracks) {
@@ -541,6 +546,23 @@ bool rush2::circuit::set_race_battle(uint8_t* rdram, bool on) {
     return true;
 }
 
+int rush2::circuit::explosive(uint8_t* rdram) {
+    if (!in_circuit(rdram) || rush2::online::game::circuit_length() > 0) return -1;
+    std::lock_guard lock{ setups_mutex };
+    return setup_of(rdram).explosive;
+}
+
+bool rush2::circuit::set_explosive(uint8_t* rdram, bool on) {
+    if (!in_circuit(rdram) || rush2::online::game::circuit_length() > 0) return false;
+    std::lock_guard lock{ setups_mutex };
+    Setup& s = setup_of(rdram);
+    if (s.explosive != (on ? 1 : 0)) {
+        s.explosive = on ? 1 : 0;
+        save_setups();
+    }
+    return true;
+}
+
 // func_803ABE0C at 0x803ABF3C: $a0 = whether this is a circuit, about to take the circuit's greying.
 extern "C" void rush2_circuit_more_input(uint8_t* rdram, recomp_context* ctx) {
     if (ctx->r4 != 0 && open_in_circuit(rdram)) ctx->r4 = 0;
@@ -603,6 +625,25 @@ extern "C" int rush2_circuit_fixed_difficulty(uint8_t* rdram, recomp_context* ct
         (MEM_BU(block_flags, (int32_t)ctx->r8) >> 3) & 7, fixed ? "kept" : "follows the standings");
     std::fflush(stdout);
     return fixed ? 1 : 0;
+}
+
+// The computer cars' skill on courses Rush 2's circuits never had (GitHub issue 60). In a circuit, rubber_band
+// (func_800A1A98, 0x800A2314-0x800A2378) scales each drone's pace by its skill on the course: f20 *= skill / 3 + 0.75,
+// skill = s16 at the standings 0x800D3B28 + car x 0x58 + 0x3C + 2 x (track + 7 x backward). Those are 14 entries a car
+// (courses 0-6 forward, then backward), filled from 0x800BD42C (values 0-6) by func_800A7DCC. HALFPIPE to MIDWAY
+// (7-10, which the Circuit Courses option can add) raced backward come to entries 14-17, past the car's own: the next
+// car's place and points (CRASH: its points, a u16 that grows over the circuit, so the drones' pace targets +0x808 /
+// +0x814 head far out of range and slide there 0.01 a frame: the drones stall, are flung ~1e11 ft off the course, and
+// drone_driver_80074990's lane walk never ends for such a drone, freezing the game; docs/npc_cars.md#circuit-skill).
+// The hook keeps the entry within the car's 14: forward races of 7-10 already read entries 7-10
+// (in range, left as they are), backward ones wrap to entries 0-3.
+// rubber_band at 0x800A2358: $t9 = 0x800D0000 + the entry's offset, about to load it; $a1 = the track, $v0 = 0 or 7.
+extern "C" void rush2_circuit_skill_entry(uint8_t* rdram, recomp_context* ctx) {
+    int32_t entry = (int32_t)ctx->r5 + (int32_t)ctx->r2;
+    int32_t kept = entry % 14;
+    if (kept != entry) {
+        ctx->r25 = (gpr)(int32_t)((int32_t)ctx->r25 + (kept - entry) * 2);
+    }
 }
 
 // Accurate Circuit Review. When a circuit completes, the game goes on to its victory screen, which is the title's

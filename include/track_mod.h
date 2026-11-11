@@ -90,12 +90,42 @@ namespace rush2::track_mod {
         // rush2_track49_gravity), for each gravity cheat setting.
         std::string gravity = "rush2";
         std::optional<float> start_time;
+        std::optional<float> finish_time;                     // what crossing the finish adds (start_time if unset)
         std::vector<std::array<float, 3>> checkpoint_time;   // per checkpoint: first lap, later laps (third unused)
         std::vector<float> best_times;
         std::array<uint8_t, 3> fog = { 0xA0, 0xB8, 0xD0 };
         std::string sky = "none";                             // none or a stock_skies name
         float cloud_scroll = 0.0f, sky_parallax = 0.0f;
+        // [look] car_light: every car on the track is drawn multiplied by this color (a night track's darkness, the
+        // PS1 SF Rush's night: src/rush2049/track2049_movers.cpp, src/car_probes.cpp). Unset: the cars' own lighting.
+        std::optional<std::array<uint8_t, 3>> car_light;
+        // [handling] traction: [speed in mph, factor] steps, in rising speed: a car at or past a step's speed has its
+        // push along the ground (engine, brakes, tires, drag; not gravity) times that factor, the last step reached
+        // counting (src/track_traction.cpp; the PS1 SF Rush's snow). Empty: Rush 2's.
+        std::vector<std::array<float, 2>> traction;
+        // [handling] air_gravity: gravity times this while all four wheels are off the road (eased in over the first
+        // foot, src/calspeed/calspeed_rom.cpp air_gravity), so jumps fly shorter while driving on the road is Rush 2's.
+        // 1 to 10, default 1 (the PS1 SF Rush's stunt road: 2).
+        float air_gravity = 1.0f;
+        // [ai] speed_quantiles: the computer cars' target speeds (mph) as quantiles, evenly spaced from slowest to
+        // fastest: each AI path point takes the speed at its rank by the tightest corner in the next 500 ft, the
+        // tightest the slowest (src/track_mod/track_mod_convert.cpp target_speeds), in place of the radius table fitted
+        // to Rush 2's and Rush 2049's stock lanes. The PS1 SF Rush's courses take their N64 versions' lane speeds
+        // (tools/rush1/lane_speed_table.py). Empty: the stock table.
+        std::vector<float> ai_speed_quantiles;
+        // [ai] traction_margin: with [handling] traction, how much of the traction's grip the computer cars' corner
+        // speeds aim for (and the cap on authored _SPEED), 0.1 to 1, default 1 (src/track_mod/track_mod_convert.cpp
+        // target_speeds). Snow drones that aim at all of it slide wide; a track tunes it for its drones' snow pace.
+        float ai_traction_margin = 1.0f;
+        // [ai] speed_scale: the computed target speeds (not authored _SPEED) times this, 0.3 to 1.5, default 1: a
+        // version of a course whose drones should run a set share of another's pace (the PS1 SF Rush's snow,
+        // src/sfrush_ps1/ps1_track.cpp snow_tuning).
+        float ai_speed_scale = 1.0f;
+        // [audio] music: the track's own songs, played as its Original (src/music.cpp): a song of the game
+        // ("track1".."track8": Rush 2's by its track select order, or a Sound tab song's key such as "r49dc_5"), or
+        // music files in the track's folder (.ogg, .wav), one or a list. music is the first, music_list all of them.
         std::string music;
+        std::vector<std::string> music_list;
         std::string preview, logo, diorama;                   // [menu] files in the track's folder
         // [menu] after: where the track select lists the track: behind a game's tracks ("rush2", "sfrush", "rush2049",
         // "calspeed") or behind another custom track (its folder name). Empty: after the stock and added tracks.
@@ -110,12 +140,18 @@ namespace rush2::track_mod {
         // (src/smooth_collision.cpp); smooth_fold (degrees, default 20): an edge folding more than this stays sharp.
         bool smooth_collision = true;
         float smooth_fold = 20.0f;
+        // [track] smooth_height (default false): the wheels' road height is the floor's averaged over a disc round the
+        // wheel (averaged_surface in src/smooth_collision.cpp), for coarse road whose creases kick the car.
+        bool smooth_height = false;
         // [track] road_hold (default false): California Speed's road hold (src/calspeed/calspeed_rom.cpp
         // rush2_calspeed_road_hold) keeps cars on the track's crests, while the CS Road Hold option is on.
         bool road_hold = false;
         // [track] point_to_point (default false): a race run once from START to FINISH along an open AIPATH_main, as
         // California Speed's point-to-point courses (one lap, no BACKWARD; docs/custom_tracks.md#point-to-point).
         bool point_to_point = false;
+        // [track] stunts (default false): the race scores stunts and shows the stunt panel, as the Stunts on All Tracks
+        // cheat does, without the cheat being set (rush2_track_mod_stunts; the PS1 SF Rush's stunt road).
+        bool stunts = false;
         // [track] run_in (default false): a circuit whose race starts at START on a run-in that leads into the loop, as
         // Rush 2's New York One (laps round the loop from the checkpoint where AIPATH_main's end rejoins it; no
         // BACKWARD; docs/custom_tracks.md#run-in-circuits).
@@ -168,6 +204,22 @@ namespace rush2::track_mod {
         // copied in as SKYO1. Empty when the game couldn't provide it (no Rush 2049 ROM, the offline converter).
         std::vector<uint8_t> sky_container;
         std::string sky_model;
+        // Models copied in from another Rush 2 container under their own name, with a behaviour id (the coin and key
+        // models of the arcade versions' collectibles), and placement records using them: each a child of the section
+        // it is in, at its world position. Only the game fills these (src/arcade2049/arcade_collectibles.cpp, for the
+        // arcade versions of the stock courses): track.glb and track.toml can't make collectibles.
+        struct Model {
+            std::vector<uint8_t> container;
+            std::string name;
+            uint16_t behaviour = 0;
+        };
+        struct Record {
+            std::string name;
+            std::array<float, 9> m{};
+            std::array<float, 3> pos{};
+        };
+        std::vector<Model> models;
+        std::vector<Record> records;
     };
 
     struct Converted {

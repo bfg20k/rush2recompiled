@@ -63,10 +63,15 @@ void rush2_hud_laps_end(uint8_t* rdram, recomp_context* ctx);
 void rush2_interp_view_begin(uint8_t* rdram, recomp_context* ctx);
 void rush2_car49_flames_view_begin(uint8_t* rdram, recomp_context* ctx);
 void rush2_car49_flames_draw(uint8_t* rdram, recomp_context* ctx);
+void rush2_car49_flames_before_poly(uint8_t* rdram, recomp_context* ctx);
 void rush2_interp_projection(uint8_t* rdram, recomp_context* ctx);
 // Sky Fog (src/sky_fog.cpp), from rush2_model_draw: model_draw_8007AA48 about to call a node's model ($s7 node, $fp
 // list); marks the sky model as the sky.
 void rush2_sky_fog_model_draw(uint8_t* rdram, recomp_context* ctx);
+// Fill Scenery Gaps (src/scenery_fill.cpp): race_load_track_800A5110 around its placement_walk_80081790 call, so the
+// scene nodes the track's placements made are known.
+void rush2_scenery_fill_walk_begin(uint8_t* rdram, recomp_context* ctx);
+void rush2_scenery_fill_walk_end(uint8_t* rdram, recomp_context* ctx);
 void rush2_interp_root_modelview(uint8_t* rdram, recomp_context* ctx);
 void rush2_interp_poly(uint8_t* rdram, recomp_context* ctx);
 void rush2_interp_poly_vtx(uint8_t* rdram, recomp_context* ctx);
@@ -179,6 +184,7 @@ void rush2_track49_carousel_order(uint8_t* rdram, recomp_context* ctx);
 void rush2_track49_select_step(uint8_t* rdram, recomp_context* ctx);
 void rush2_track49_carousel_slide(uint8_t* rdram, recomp_context* ctx);
 void rush2_track49_carousel_place(uint8_t* rdram, recomp_context* ctx);
+void rush2_track49_carousel_restore(uint8_t* rdram, recomp_context* ctx);
 void rush2_track49_select_model(uint8_t* rdram, recomp_context* ctx);
 void rush2_track49_select_pose(uint8_t* rdram, recomp_context* ctx);
 int rush2_track49_select_available(uint8_t* rdram, recomp_context* ctx);
@@ -196,6 +202,8 @@ void rush2_car49_dent(uint8_t* rdram, recomp_context* ctx);
 bool rush2_calspeed_brake_lights(uint8_t* rdram, recomp_context* ctx);
 void rush2_livery_mirror_begin(uint8_t* rdram, recomp_context* ctx);
 void rush2_livery_mirror_end(uint8_t* rdram, recomp_context* ctx);
+void rush2_track49_stream_mirror_begin(uint8_t* rdram, recomp_context* ctx);
+void rush2_track49_stream_mirror_end(uint8_t* rdram, recomp_context* ctx);
 void rush2_car49_setup_desc(uint8_t* rdram, recomp_context* ctx);
 void rush2_car49_setup_mass(uint8_t* rdram, recomp_context* ctx);
 void rush2_car49_engine_before(uint8_t* rdram, recomp_context* ctx);
@@ -261,6 +269,8 @@ void rush2_circuit_more_grey(uint8_t* rdram, recomp_context* ctx);
 void rush2_circuit_more_step(uint8_t* rdram, recomp_context* ctx);
 void rush2_circuit_more_stepped(uint8_t* rdram, recomp_context* ctx);
 int rush2_circuit_fixed_difficulty(uint8_t* rdram, recomp_context* ctx);
+// Circuit drone skill entry kept within the car's 14 (src/circuit.cpp, GitHub issue 60).
+void rush2_circuit_skill_entry(uint8_t* rdram, recomp_context* ctx);
 // Accurate Circuit Review (src/circuit.cpp).
 void rush2_circuit_review_snapshot(uint8_t* rdram, recomp_context* ctx);
 void rush2_circuit_review_title(uint8_t* rdram, recomp_context* ctx);
@@ -300,6 +310,18 @@ int rush2_track49_battle_label(uint8_t* rdram, recomp_context* ctx);
 int rush2_track49_battle_arrow_label(uint8_t* rdram, recomp_context* ctx);
 int rush2_track49_battle_value(uint8_t* rdram, recomp_context* ctx);
 int rush2_track49_battle_step(uint8_t* rdram, recomp_context* ctx);
+// DEATHS' third value, EXPLOSIVE (src/explosive.cpp; its row in src/rush2049/track2049_menu.cpp).
+int rush2_track49_deaths_step(uint8_t* rdram, recomp_context* ctx);
+int rush2_track49_deaths_value(uint8_t* rdram, recomp_context* ctx);
+void rush2_explosive_tick(uint8_t* rdram, recomp_context* ctx);
+void rush2_explosive_race_deaths(uint8_t* rdram, recomp_context* ctx);
+int rush2_explosive_skull_hidden(uint8_t* rdram, recomp_context* ctx);
+// CHECKPOINTS' third value, CLOCKS: Time Sprint (src/time_sprint.cpp; its row in src/rush2049/track2049_menu.cpp).
+void rush2_time_sprint_tick(uint8_t* rdram, recomp_context* ctx);
+int rush2_time_sprint_checkpoint(uint8_t* rdram, recomp_context* ctx);
+int rush2_time_sprint_checkpoint_sound(uint8_t* rdram, recomp_context* ctx);
+int rush2_track49_clocks_step(uint8_t* rdram, recomp_context* ctx);
+int rush2_track49_clocks_value(uint8_t* rdram, recomp_context* ctx);
 void rush2_track49_option_scroll(uint8_t* rdram, recomp_context* ctx);
 void rush2_track49_option_box(uint8_t* rdram, recomp_context* ctx);
 void rush2_track49_option_text_rows(uint8_t* rdram, recomp_context* ctx);
@@ -309,6 +331,7 @@ void rush2_track49_stuck_timer(uint8_t* rdram, recomp_context* ctx);
 void rush2_track49_respawn_delay(uint8_t* rdram, recomp_context* ctx);
 void rush2_ghost_leaf_filter(uint8_t* rdram, recomp_context* ctx, uint32_t list, uint32_t car);
 void rush2_track49_gravity(uint8_t* rdram, float* gravity);
+void rush2_track_mod_stunts(uint8_t* rdram, recomp_context* ctx);
 int rush2_track49_respawn_zone(uint8_t* rdram, recomp_context* ctx);
 void rush2_track49_respawn_zone_advance(uint8_t* rdram, recomp_context* ctx);
 void rush2_track49_respawn_zone_place(uint8_t* rdram, recomp_context* ctx);
@@ -433,6 +456,10 @@ void rush2_calspeed_demo_start(uint8_t* rdram, recomp_context* ctx);
 void rush2_calspeed_respawn_advance(uint8_t* rdram, recomp_context* ctx);
 void rush2_calspeed_respawn_place(uint8_t* rdram, recomp_context* ctx);
 void rush2_calspeed_wheel_support(uint8_t* rdram, recomp_context* ctx);
+// A custom track's [handling] traction in car_linear_accel_stage (src/track_traction.cpp).
+void rush2_track_traction(uint8_t* rdram, recomp_context* ctx);
+// Car Lights: the lit brake lights' markers on a night track, before each view (src/car_lights.cpp).
+void rush2_car_lights_view(uint8_t* rdram, recomp_context* ctx);
 // California Speed's walls and missed wheels (src/calspeed/calspeed_walls.cpp) and physics (calspeed_physics.cpp),
 // with the CS Physics option.
 int rush2_calspeed_wall_collision(uint8_t* rdram, recomp_context* ctx);
@@ -465,6 +492,8 @@ void rush2_wings_gravity(uint8_t* rdram, recomp_context* ctx);
 void rush2_wings_drag(uint8_t* rdram, recomp_context* ctx);
 void rush2_wings_car_init(uint8_t* rdram, recomp_context* ctx);
 void rush2_wings_model_draw(uint8_t* rdram, recomp_context* ctx);
+// The wings' contrails, once per physics tick (src/rush2049/wings_contrails.cpp).
+void rush2_wings_contrails_tick(uint8_t* rdram, recomp_context* ctx);
 
 // Ghost races (src/ghost.cpp).
 void rush2_ghost_settings(uint8_t* rdram, recomp_context* ctx);
@@ -577,6 +606,8 @@ void rush2_online_present_end(uint8_t* rdram, recomp_context* ctx);
 int rush2_online_sim_view(uint8_t* rdram, uint32_t car_state, int view);
 int rush2_online_body_kind(uint8_t* rdram, recomp_context* ctx, int car, int kind);
 int rush2_online_wheels_shown(uint8_t* rdram, uint32_t physics_car, int view, int shown);
+uint32_t rush2_mod_car_wheel_scale(uint8_t* rdram, int type, uint32_t scale_bits);
+void rush2_mod_car_shadows(uint8_t* rdram);
 uint32_t rush2_online_arrow_views(uint8_t* rdram, int car, uint32_t flags);
 int rush2_online_arrow_view(uint8_t* rdram, int view);
 int rush2_online_hud_views(uint8_t* rdram, int views);

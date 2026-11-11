@@ -966,6 +966,9 @@ namespace {
         bool cutout = false;
         bool blend = false;     // translucent (glTF BLEND), drawn in the late pass
         bool wraps = true;      // repeats (not clamped) both ways: coordinates may be shifted by whole repeats
+        // Mirrored repeat (glTF 33648) in s / t: the image repeats every two tiles, so that coordinate shifts by
+        // even counts only (an odd shift draws the tile flipped).
+        bool mirror_s = false, mirror_t = false;
     };
 
     // A list being built: its commands, the vertices they load (offsets into `vertices` in the G_VTX commands listed
@@ -1178,6 +1181,8 @@ namespace {
                 if (dm.wraps) {
                     su = std::floor(std::min({ t.uv[0][0], t.uv[1][0], t.uv[2][0] }));
                     sv = std::floor(std::min({ t.uv[0][1], t.uv[1][1], t.uv[2][1] }));
+                    if (dm.mirror_s) su = 2.0f * std::floor(su / 2.0f);
+                    if (dm.mirror_t) sv = 2.0f * std::floor(sv / 2.0f);
                 }
                 std::array<int, 3> tri;
                 for (int k = 0; k < 3; k++) {
@@ -1302,6 +1307,8 @@ namespace {
             const rush2::gltf::Material* mat = mats[i];
             draw.push_back({ &textures[i], mat && mat->alpha_mode != "OPAQUE",
                              !mat || (mat->wrap_s != 33071 && mat->wrap_t != 33071) });
+            draw.back().mirror_s = mat && mat->wrap_s == 33648;
+            draw.back().mirror_t = mat && mat->wrap_t == 33648;
         }
 
         // Blob: texels, vertices, list.
@@ -1396,8 +1403,10 @@ bool rush2::track_mod::parse_settings(const std::string& text, Settings& s, Repo
     str("track", "gravity", s.gravity);
     if (auto v = t["track"]["smooth_collision"].value<bool>()) s.smooth_collision = *v;
     if (auto v = t["track"]["smooth_fold"].value<double>()) s.smooth_fold = float(std::clamp(*v, 0.0, 90.0));
+    if (auto v = t["track"]["smooth_height"].value<bool>()) s.smooth_height = *v;
     if (auto v = t["track"]["road_hold"].value<bool>()) s.road_hold = *v;
     if (auto v = t["track"]["point_to_point"].value<bool>()) s.point_to_point = *v;
+    if (auto v = t["track"]["stunts"].value<bool>()) s.stunts = *v;
     if (auto v = t["track"]["run_in"].value<bool>()) s.run_in = *v;
     if (s.gravity != "rush2" && s.gravity != "rush2049") {
         report.error("track.toml: [track] gravity must be \"rush2\" or \"rush2049\"; \"" + s.gravity + "\" races on Rush 2's.");
@@ -1411,6 +1420,7 @@ bool rush2::track_mod::parse_settings(const std::string& text, Settings& s, Repo
     if (t["race"]["laps"]) report.info("track.toml: laps is ignored (players pick the lap count).");
     if (t["race"]["mirror"]) report.info("track.toml: mirror is ignored (every track can be raced mirrored).");
     if (auto v = t["race"]["start_time"].value<double>()) s.start_time = float(*v);
+    if (auto v = t["race"]["finish_time"].value<double>()) s.finish_time = float(*v);
     if (auto* arr = t["race"]["checkpoint_time"].as_array()) {
         for (auto& e : *arr) {
             std::array<float, 3> times{};
@@ -1451,7 +1461,74 @@ bool rush2::track_mod::parse_settings(const std::string& text, Settings& s, Repo
     }
     if (auto v = t["look"]["cloud_scroll"].value<double>()) s.cloud_scroll = float(*v);
     if (auto v = t["look"]["sky_parallax"].value<double>()) s.sky_parallax = float(*v);
-    str("audio", "music", s.music);
+    if (auto v = t["look"]["car_light"].value<std::string>()) {
+        unsigned r, g, b;
+        if (v->size() == 7 && (*v)[0] == '#' && sscanf(v->c_str() + 1, "%02x%02x%02x", &r, &g, &b) == 3) {
+            s.car_light = std::array<uint8_t, 3>{ uint8_t(r), uint8_t(g), uint8_t(b) };
+        }
+        else {
+            report.error("track.toml: car_light must look like \"#454046\".");
+        }
+    }
+    if (auto* arr = t["handling"]["traction"].as_array()) {
+        float last = -1.0f;
+        for (auto& e : *arr) {
+            auto* step = e.as_array();
+            auto speed = step && step->size() == 2 ? (*step)[0].value<double>() : std::nullopt;
+            auto factor = step && step->size() == 2 ? (*step)[1].value<double>() : std::nullopt;
+            if (!speed || !factor || *speed < 0.0 || *factor <= 0.0 || *factor > 4.0 || float(*speed) <= last) {
+                report.error("track.toml: each [handling] traction step is [speed in mph, factor above 0, up to 4], "
+                             "in rising speed.");
+                s.traction.clear();
+                break;
+            }
+            last = float(*speed);
+            s.traction.push_back({ float(*speed), float(*factor) });
+        }
+    }
+    if (auto v = t["handling"]["air_gravity"].value<double>()) {
+        if (*v >= 1.0 && *v <= 10.0) {
+            s.air_gravity = float(*v);
+        }
+        else {
+            report.error("track.toml: [handling] air_gravity must be from 1 to 10; the track keeps Rush 2's.");
+        }
+    }
+    if (auto* arr = t["ai"]["speed_quantiles"].as_array()) {
+        float last = 0.0f;
+        for (auto& e : *arr) {
+            auto mph = e.value<double>();
+            if (!mph || *mph < 1.0 || *mph > 255.0 || float(*mph) < last) {
+                report.error("track.toml: [ai] speed_quantiles lists mph from 1 to 255, slowest first; the stock table is used.");
+                s.ai_speed_quantiles.clear();
+                break;
+            }
+            last = float(*mph);
+            s.ai_speed_quantiles.push_back(float(*mph));
+        }
+        if (s.ai_speed_quantiles.size() == 1) {
+            report.error("track.toml: [ai] speed_quantiles needs at least two speeds; the stock table is used.");
+            s.ai_speed_quantiles.clear();
+        }
+    }
+    if (auto m = t["ai"]["speed_scale"].value<double>()) {
+        if (*m >= 0.3 && *m <= 1.5) s.ai_speed_scale = float(*m);
+        else report.error("track.toml: [ai] speed_scale must be from 0.3 to 1.5; 1 is used.");
+    }
+    if (auto m = t["ai"]["traction_margin"].value<double>()) {
+        if (*m >= 0.1 && *m <= 1.0) s.ai_traction_margin = float(*m);
+        else report.error("track.toml: [ai] traction_margin must be from 0.1 to 1; 1 is used.");
+    }
+    if (auto* arr = t["audio"]["music"].as_array()) {
+        for (auto& e : *arr) {
+            if (auto v = e.value<std::string>()) s.music_list.push_back(*v);
+            else report.error("track.toml: [audio] music lists song names or files (strings).");
+        }
+    }
+    else if (auto v = t["audio"]["music"].value<std::string>()) {
+        s.music_list.push_back(*v);
+    }
+    if (!s.music_list.empty()) s.music = s.music_list[0];
     str("menu", "preview", s.preview);
     str("menu", "logo", s.logo);
     str("menu", "diorama", s.diorama);
@@ -1554,7 +1631,7 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
     std::map<int, const rush2::gltf::Node*> checkpoints, grid;
     std::vector<std::pair<float, const rush2::gltf::Node*>> aispeeds;
     std::vector<std::pair<int, const rush2::gltf::Node*>> pickup_nodes;   // PICKUP_<kind>: kind as PickupRecord::kind
-    std::vector<const rush2::gltf::Node*> visual, sky, billboard_nodes;
+    std::vector<const rush2::gltf::Node*> visual, sky, sea, billboard_nodes, finish_banner;
     std::vector<std::pair<int, const rush2::gltf::Node*>> prop_nodes;    // PROP_: PropRecord::type
     const bool arena = is_arena(settings);
     // A point-to-point race ([track] point_to_point): run once from START to FINISH along an open AIPATH_main, as
@@ -1687,6 +1764,17 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
         if (int k = number_after(name, "START_"); k >= 0) { grid[k] = &n; continue; }
         if (int k = number_after(name, "AISPEED_"); k >= 0) { aispeeds.push_back({ float(k), &n }); continue; }
         if (name == "SKY") { if (mesh) sky.push_back(&n); else report.warning(n.name + " has no mesh; ignored."); continue; }
+        // SEA (docs/custom_tracks.md#sea): never drawn by the game; Fill Scenery Gaps' extended ground lays its water there.
+        if (name == "SEA") { if (mesh) sea.push_back(&n); else report.warning(n.name + " has no mesh; ignored."); continue; }
+        // The finish banner (FINISH_BANNER*): Rush 2's own <prefix>FINISH model, whose CHKPNT faces turn to FINISH on the
+        // last lap. FINISH_BANNER_LAST is never drawn: it only keeps the FINISH material in an export that drops unused
+        // ones.
+        if (starts(name, "FINISH_BANNER_LAST")) continue;
+        if (starts(name, "FINISH_BANNER")) {
+            if (mesh) finish_banner.push_back(&n);
+            else report.warning(n.name + " has no mesh; ignored.");
+            continue;
+        }
         if (starts(name, "PROP_")) {
             std::string kind = upper(name.substr(5));
             int type = starts(kind, "KNOCK") ? rush2::track2049::prop_knock : starts(kind, "TIP") ? rush2::track2049::prop_tip : 0;
@@ -1773,10 +1861,24 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
     // A circuit's gates are FINISH and then CHECKPOINT_1, 2, ...; a point-to-point race's START, the checkpoints and
     // FINISH last (START stands in at the path's start when there is none: see the AI path below).
     // loop: a run-in circuit's loop start (flags 4), where the path's end comes back onto it.
-    struct Gate { std::string name; Vec3 pos, dir; float radius; int at = -1; bool loop = false; };
+    // radius: half the marker's width (its X scale), where the converter looks for the AI path's crossing. pass: the
+    // marker's pass_radius custom property (m, kept in ft here), how far from it seen from above a car may cross its
+    // line and still count, when that is wider (0: radius). The path file's gate radius is the larger: it is what the
+    // race's gate test (func_800A1468) reads, while the crossings stay the converter's (rush2_mod_checkpoint_crossing).
+    struct Gate { std::string name; Vec3 pos, dir; float radius; int at = -1; bool loop = false; float pass = 0.0f; };
+    auto pass_radius = [](const rush2::gltf::Node* n) {
+        if (!n->extras.contains("pass_radius")) return 0.0f;
+        const auto& v = n->extras["pass_radius"];
+        return v.is_number() ? std::max(0.0f, v.get<float>()) * feet_per_meter : 0.0f;
+    };
+    auto marker_gate = [&](std::string name, const rush2::gltf::Node* n) {
+        Gate g{ std::move(name), to_game(n->position()), forward(n), half_width(n) };
+        g.pass = pass_radius(n);
+        return g;
+    };
     std::vector<Gate> gates;
-    if (finish && !open_path) gates.push_back({ "FINISH", to_game(finish->position()), forward(finish), half_width(finish) });
-    if (start_line) gates.push_back({ "START", to_game(start_line->position()), forward(start_line), half_width(start_line) });
+    if (finish && !open_path) gates.push_back(marker_gate("FINISH", finish));
+    if (start_line) gates.push_back(marker_gate("START", start_line));
     if (arena) {
         // Start spots: Rush 2049's battle starts player p at checkpoint [0, 2, 1, 3][p] (rush2_track49_battle_start), the
         // stunt mode at the path's first point, which is START_1's.
@@ -1793,9 +1895,9 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
     int cps_added = 0;
     for (const auto& [k, n] : checkpoints) {
         if (cps_added++ >= max_cps) break;   // the extra ones were reported above
-        gates.push_back({ "CHECKPOINT_" + std::to_string(k), to_game(n->position()), forward(n), half_width(n) });
+        gates.push_back(marker_gate("CHECKPOINT_" + std::to_string(k), n));
     }
-    if (finish && open_path) gates.push_back({ "FINISH", to_game(finish->position()), forward(finish), half_width(finish) });
+    if (finish && open_path) gates.push_back(marker_gate("FINISH", finish));
     for (size_t i = 0; i < gates.size(); i++) {
         const Gate& g = gates[i];
         if (length(g.dir) < 0.5f) report.error(g.name + " points straight up or down; turn it so its green arrow points down the track.");
@@ -2703,6 +2805,10 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
     // Past a run-in circuit's last spine point the race goes on from the loop start's crossing.
     long loop_at = -1;
     for (const Gate& g : gates) if (g.loop && g.at >= 0) loop_at = g.at;
+    // [handling] traction's limit on authored speeds (mph per spine point, the forward race's): the speed its grip
+    // allows round the corner ahead, braked for at its grip. Empty without traction. Authored spine speeds take it in
+    // target_speeds, painted lanes' in write_path.
+    std::vector<float> traction_cap;
     auto target_speeds = [&](const std::vector<PathPoint>& sp, bool forward) {
         size_t n = sp.size();
         // Point i + k along the race: a circuit wraps to its start, a run-in circuit to its loop start, a
@@ -2729,32 +2835,109 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
         // 37-51 mph where they hold 72-100). They follow the tightest corner in the next 500 ft, and only loosely: this
         // table matches that radius's quantiles to the lane speeds' over every lane of Rush 2's ten circuit tracks and
         // Rush 2049's six race tracks (2049's / 1.2), so the speeds spread as the stock ones do (tools/stock_track_glb.py).
+        // [ai] speed_quantiles replaces it (below; the PS1 SF Rush's courses take their N64 versions' lane speeds, which
+        // the stock table rated 10-30 mph slow in Golden Gate's corners: tools/rush1/lane_speed_table.py).
         static const float table[][2] = { { 91, 83 }, { 114, 97 }, { 154, 107 }, { 205, 118 }, { 270, 124 },
                                           { 347, 131 }, { 430, 136 }, { 538, 142 }, { 725, 149 }, { 1088, 153 },
                                           { 1800, 158 } };
+        const size_t last = 10;
         const size_t ahead = size_t(500.0f / spine_step);
+        // [handling] traction (snow): a car at or past a step's speed pushes along the ground with that step's
+        // factor, cornering and braking alike (src/track_traction.cpp). The table's speeds aren't all at the cars'
+        // grip: its tight corners are driven at up to a_dry, its gentle ones at a fraction of it (149 mph round 725 ft
+        // is 66 ft/s^2 against 177 round 114 ft). So a corner is slowed only where its speed needs more sideways
+        // grip than f x a_dry, to sqrt(f x a_dry x r); solved over the steps, since f depends on the speed. The
+        // first version took sqrt(f) of every speed and braked f times as softly: the AI crawled through gentle bends
+        // and braked on the straights, where a player in snow is still far from the cars' grip.
+        const auto& steps = settings.traction;
+        auto grip_at = [&](float mph) {
+            float f = 1.0f;
+            for (const auto& st : steps) if (mph >= st[0]) f = st[1];
+            return f;
+        };
+        // ft/s^2: the most sideways grip the stock table asks for, the cars' grip as Rush 2's and Rush 2049's lanes
+        // show it (a track's own speeds may ask for more on a fast course; snow still holds them to this grip).
+        float a_dry = 0.0f;
+        for (const auto& t : table) a_dry = std::max(a_dry, (t[1] * 1.4667f) * (t[1] * 1.4667f) / t[0]);
+        // [ai] traction_margin: the share of the traction's grip aimed for (1 by default). Snow drones aiming at all
+        // of it slide wide off the road (the PS1 courses' hold 31-36 ft/s^2 sideways at full lock in snow, against the
+        // 88 f x a_dry gives): the PS1 conversion tunes it per course (src/sfrush_ps1/ps1_track.cpp).
+        const float traction_margin = settings.ai_traction_margin;
+        auto with_traction = [&](float s_table, float r, float cap) {
+            if (steps.empty()) return std::min(s_table, cap);
+            // From the fastest step's range down: the first range the grip-limited speed reaches is the answer, held
+            // to the range's top (the speed just below the next step, whose weaker grip it can't take).
+            for (size_t k = steps.size() + 1; k-- > 0;) {
+                float lo = k == 0 ? 0.0f : steps[k - 1][0];
+                float hi = k == steps.size() ? 1e9f : steps[k][0];
+                float f = k == 0 ? 1.0f : steps[k - 1][1];
+                float s = std::min(s_table, std::sqrt((k == 0 ? 1.0f : traction_margin) * f * a_dry * std::min(r, 1e7f)) / 1.4667f);
+                if (s >= lo || k == 0) return std::min({ s, hi, cap });
+            }
+            return std::min(s_table, cap);
+        };
+        std::vector<float> r_ahead(n);
         for (size_t i = 0; i < n; i++) {
             float r = 1e9f;
             for (size_t k = 0; k <= ahead; k++) r = std::min(r, radius[ahead_of(i, k)]);
+            r_ahead[i] = r;
+        }
+        // A track's own speed quantiles: the points ranked by the radius ahead (ties keep path order), each taking the
+        // speed at its rank, so the path's speeds spread exactly as the given ones.
+        const auto& quantiles = settings.ai_speed_quantiles;
+        std::vector<float> ranked(n, 0.0f);
+        if (!quantiles.empty() && n > 1) {
+            std::vector<size_t> order(n);
+            for (size_t i = 0; i < n; i++) order[i] = i;
+            std::stable_sort(order.begin(), order.end(), [&](size_t x, size_t y) { return r_ahead[x] < r_ahead[y]; });
+            for (size_t k = 0; k < n; k++) {
+                float at = float(k) / float(n - 1) * float(quantiles.size() - 1);
+                size_t lo = std::min(size_t(at), quantiles.size() - 2);
+                ranked[order[k]] = quantiles[lo] + (quantiles[lo + 1] - quantiles[lo]) * (at - float(lo));
+            }
+        }
+        const float straights = quantiles.empty() ? table[last][1] : quantiles.back();
+        for (size_t i = 0; i < n; i++) {
+            const float r = r_ahead[i];
             float s = table[0][1];
-            if (r >= table[10][0]) s = table[10][1];
-            else for (int t = 0; t < 10; t++) {
+            if (!quantiles.empty()) s = ranked[i];
+            else if (r >= table[last][0]) s = table[last][1] * std::sqrt(std::min(r, 1e7f) / table[last][0]);
+            else for (size_t t = 0; t < last; t++) {
                 if (r > table[t][0] && r <= table[t + 1][0]) {
                     float f = std::log(r / table[t][0]) / std::log(table[t + 1][0] / table[t][0]);
                     s = table[t][1] + (table[t + 1][1] - table[t][1]) * f;
                 }
             }
-            v[i] = s * 1.4667f;
+            v[i] = with_traction(s, r, straights) * 1.4667f * settings.ai_speed_scale;
         }
         // Authored speeds (AIPATH_main's _SPEED, forward races only) replace the computed ones and keep their own
-        // braking; AISPEED caps still apply.
+        // braking; AISPEED caps still apply, and so does traction: an authored speed is held to what the grip allows
+        // round the corner ahead (with_traction's limit), braked for at that grip.
         std::vector<bool> authored(n, false);
+        const float decel = 28.0f;
+        auto decel_at = [&](float fps) { return std::min(decel, grip_at(fps / 1.4667f) * a_dry); };
+        std::vector<float> cap;
+        if (!steps.empty()) {
+            cap.resize(n);
+            for (size_t i = 0; i < n; i++) cap[i] = with_traction(255.0f, r_ahead[i], 255.0f) * 1.4667f;
+            for (int pass = 0; pass < 2; pass++) {
+                for (size_t k = 0; k < n; k++) {
+                    size_t i = (n - 1 - k), j = ahead_of(i, 1);
+                    if (p2p && i + 1 == n) continue;
+                    float from = std::sqrt(cap[j] * cap[j] + 2.0f * decel_at(cap[j]) * spine_step);
+                    cap[i] = std::min(cap[i], from);
+                }
+            }
+        }
         if (forward) {
             for (size_t i = 0; i < n; i++) {
                 if (std::isnan(sp[i].speed)) continue;
                 v[i] = std::clamp(sp[i].speed, 1.0f, 255.0f) * 1.4667f;
+                if (!cap.empty()) v[i] = std::min(v[i], cap[i]);
                 authored[i] = true;
             }
+            traction_cap.clear();
+            for (float c : cap) traction_cap.push_back(c / 1.4667f);
         }
         // AISPEED caps: from the nearest point on, until the next marker (0 lifts the cap), in the forward race's order
         // in both directions, so a cap covers the same stretch of road backward (backward point i is forward point
@@ -2783,13 +2966,18 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
                 v[i] = std::min(v[i], caps[c].second * 1.4667f);
             }
         }
-        // Brake ahead of slow points: v^2 <= v_next^2 + 2 * decel * step, twice around for the wrap.
-        const float decel = 28.0f;
+        // Brake ahead of slow points: v^2 <= v_next^2 + 2 * decel * step, twice around for the wrap. The AI's 28 ft/s^2
+        // is well inside the grip the table shows the cars have, so traction only cuts it where f x a_dry falls below
+        // it (never at the PS1 snow's f = 0.5: 88 ft/s^2).
         for (int pass = 0; pass < 2; pass++) {
             for (size_t k = 0; k < n; k++) {
                 size_t i = (n - 1 - k), j = ahead_of(i, 1);
                 if (authored[i] || (p2p && i + 1 == n)) continue;
-                v[i] = std::min(v[i], std::sqrt(v[j] * v[j] + 2.0f * decel * spine_step));
+                // The grip at the speed braked from: the slower point's first, then at the speed that gives (never
+                // more, the steps weakening as the speed rises).
+                float from = std::sqrt(v[j] * v[j] + 2.0f * decel_at(v[j]) * spine_step);
+                from = std::sqrt(v[j] * v[j] + 2.0f * decel_at(from) * spine_step);
+                v[i] = std::min(v[i], from);
             }
         }
         for (size_t i = 0; i < n; i++) mph[i] = std::clamp(v[i] / 1.4667f, authored[i] ? 1.0f : 25.0f, authored[i] ? 255.0f : 200.0f);
@@ -3012,7 +3200,8 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
                 // Pointing back against the race, as in every stock path file (the gate test 0x800A15BC takes a
                 // side change either way).
                 for (float f : g.dir) addf(d, -f);
-                add32(d, uint32_t(std::min(65535.0f, g.radius) * std::min(65535.0f, g.radius)));
+                float r = std::min(65535.0f, std::max(g.radius, g.pass));
+                add32(d, uint32_t(r * r));
                 // Circuit: the finish is the lap line, arms lap counting and starts the loop (7). An open path:
                 // open_flags.
                 add16(d, open_path ? open_flags(c) : c == 0 ? 7 : 0);
@@ -3064,7 +3253,10 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
                 for (float c : lane[i]) add16(d, s16(c));
                 float speed = mph[i], mode = sp[i].mode;
                 if (ai && i < ai->speed[k].size()) {
-                    if (!std::isnan(ai->speed[k][i])) speed = ai->speed[k][i];
+                    if (!std::isnan(ai->speed[k][i])) {
+                        speed = ai->speed[k][i];
+                        if (i < traction_cap.size()) speed = std::min(speed, traction_cap[i]);
+                    }
                     if (!std::isnan(ai->mode[k][i])) mode = ai->mode[k][i];
                 }
                 add8(d, uint8_t(std::clamp(std::lround(speed), 1l, 255l)));
@@ -3437,8 +3629,25 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
         report.info(b);
     }
 
+    // The sea (SEA meshes): one model, FILLSEA, that nothing places, so the game never draws it. Fill Scenery Gaps'
+    // extended ground (src/scenery_fill_build.cpp) reads it from the track's models: water at its height, with its
+    // material, where the track has no ground or only a deck high over it. Its vertices are in whole feet (not the
+    // models' 1/16 ft), so it can reach 32,000 ft from the origin.
+    std::vector<VisualTri> seatris;
+    for (const auto* n : sea) append_tris(*n, seatris);
+    if (!seatris.empty()) {
+        float reach = 0.0f;
+        for (const VisualTri& t : seatris) for (const Vec3& p : t.p) reach = std::max({ reach, std::fabs(p[0]), std::fabs(p[1]), std::fabs(p[2]) });
+        char b[192];
+        snprintf(b, sizeof(b), "SEA: %zu triangles, %s from the origin at most; the water of Fill Scenery Gaps' extended ground, never drawn otherwise.",
+                 seatris.size(), fmt_ft(reach).c_str());
+        report.info(b);
+        if (reach > 32000.0f) report.warning("SEA reaches past 32,000 ft from the origin; it is cut off there.");
+    }
+
     // Materials -> stand-in textures (one per material).
     std::vector<int> used_materials;
+    for (const VisualTri& t : seatris) if (std::find(used_materials.begin(), used_materials.end(), t.material) == used_materials.end()) used_materials.push_back(t.material);
     for (const VisualTri& t : stris) if (std::find(used_materials.begin(), used_materials.end(), t.material) == used_materials.end()) used_materials.push_back(t.material);
     for (const VisualTri& t : vtris) if (std::find(used_materials.begin(), used_materials.end(), t.material) == used_materials.end()) used_materials.push_back(t.material);
     for (const Mover& m : movers) {
@@ -3446,6 +3655,30 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
     }
     for (const BillboardModel& b : billboard_models) {
         for (const VisualTri& t : b.tris) if (std::find(used_materials.begin(), used_materials.end(), t.material) == used_materials.end()) used_materials.push_back(t.material);
+    }
+    // The finish banner (Rush 2's <prefix>FINISH, func_8008F080): its faces, and the materials named CHKPNT and FINISH,
+    // whose texture-load lists are the texture table's CHKPNT and FINISH entries. When a player passes the last
+    // checkpoint of the last lap (checkpoint_passed_8008F220), Rush 2 points the banner's calls to CHKPNT's list at
+    // FINISH's (mirror_winding_walk_80077518), so FINISH is drawn with CHKPNT's coordinates.
+    std::vector<VisualTri> btris;
+    for (const auto* n : finish_banner) append_tris(*n, btris);
+    auto material_named = [&](const char* nm) {
+        for (size_t i = 0; i < scene.materials.size(); i++) if (scene.materials[i].name == nm) return int(i);
+        return -1;
+    };
+    int chkpnt_material = -1, finish_material = -1;
+    if (!btris.empty()) {
+        for (const VisualTri& t : btris) if (std::find(used_materials.begin(), used_materials.end(), t.material) == used_materials.end()) used_materials.push_back(t.material);
+        int c = material_named("CHKPNT"), f = material_named("FINISH");
+        bool on_banner = std::any_of(btris.begin(), btris.end(), [&](const VisualTri& t) { return c >= 0 && t.material == c; });
+        if (!on_banner) report.warning("FINISH_BANNER has no faces in a material named CHKPNT: it never changes to FINISH.");
+        else if (f < 0) report.warning("There is no material named FINISH (keep it on a mesh named FINISH_BANNER_LAST): the finish banner never changes.");
+        else {
+            chkpnt_material = c;
+            finish_material = f;
+            if (std::find(used_materials.begin(), used_materials.end(), f) == used_materials.end()) used_materials.push_back(f);
+        }
+        if (gates.empty()) report.warning("FINISH_BANNER needs the FINISH gate; it isn't drawn.");
     }
     auto is_blend = [&](int m) { return m >= 0 && m < (int)scene.materials.size() && scene.materials[m].alpha_mode == "BLEND"; };
     std::map<int, int> texture_of;      // material -> out.textures
@@ -3456,6 +3689,16 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
         texture_of[m] = int(out.textures.size());
         cutout_of[m] = cutout;
         out.textures.push_back(make_texture(scene, mat, cutout ? (mat->alpha_mode == "MASK" ? mat->alpha_cutoff : 0.5f) : 0.0f));
+    }
+    if (chkpnt_material >= 0) {
+        // The swap keeps CHKPNT's texture coordinates, so FINISH's image has to come out at the same size.
+        const auto& c = out.textures[size_t(texture_of[chkpnt_material])];
+        const auto& f = out.textures[size_t(texture_of[finish_material])];
+        if (c.width != f.width || c.height != f.height) {
+            report.warning("The FINISH and CHKPNT images have different shapes: give them the same size, or FINISH "
+                           "is drawn stretched.");
+        }
+        report.info("Finish banner: FINISH_BANNER, CHKPNT turning to FINISH on the last lap.");
     }
 
     // Sections on a grid, by triangle center. A triangle wider than a cell, or too big for its cell, joins the first
@@ -3560,6 +3803,35 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
         }
     }
 
+    // The game's own models for its records (Extras::models: the arcade versions' coins and keys), copied as the
+    // stock sky is. A record whose model couldn't be copied is left out.
+    struct ExtraCopy {
+        ModelCopy copy;
+        Section section;
+        uint16_t behaviour = 0;
+    };
+    std::vector<ExtraCopy> extra_copies;
+    for (const auto& em : extras.models) {
+        ExtraCopy ec;
+        std::string why;
+        if (!plan_copy(em.container, em.name, ec.copy, why)) {
+            report.error("The game's model " + em.name + " couldn't be copied: " + why + ".");
+            continue;
+        }
+        ec.section.name = em.name;
+        ec.section.radius = ec.copy.radius;
+        ec.behaviour = em.behaviour;
+        extra_copies.push_back(std::move(ec));
+    }
+    // The records draw these models (their class's model lookup is redirected to them): all or none.
+    std::vector<const rush2::track_mod::Extras::Record*> extra_records;
+    if (extra_copies.size() == extras.models.size()) {
+        for (const auto& r : extras.records) extra_records.push_back(&r);
+    }
+    if (!extra_records.empty()) {
+        report.info(std::to_string(extra_records.size()) + " collectible(s) of the course placed.");
+    }
+
     // ---- geometry container (docs/rush2049_research/geometry.md section 2) ----
     std::vector<uint8_t>& g = out.track.geometry;
     g.assign(0x28, 0);
@@ -3568,13 +3840,22 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
         t.offset = uint32_t(g.size());
         g.insert(g.end(), t.texels.begin(), t.texels.end());
     }
-    if (stock_sky_model) {
-        for (const auto& [at, bytes] : sky_copy.blocks) {
+    // A copied model's texel and palette data, then (copy_loads) its texture-load lists in the load-list range.
+    auto copy_blocks = [&](ModelCopy& c) {
+        for (const auto& [at, bytes] : c.blocks) {
             align8(g);
-            sky_copy.moved[at] = uint32_t(g.size());
-            g.insert(g.end(), sky_copy.src->begin() + at, sky_copy.src->begin() + at + bytes);
+            c.moved[at] = uint32_t(g.size());
+            g.insert(g.end(), c.src->begin() + at, c.src->begin() + at + bytes);
         }
-    }
+    };
+    auto copy_loads = [&](ModelCopy& c) {
+        for (const auto& [at, bytes] : c.loads) {
+            c.moved[at] = uint32_t(g.size());
+            copy_list(c, at, bytes, g, 0, uint32_t(g.size()));
+        }
+    };
+    if (stock_sky_model) copy_blocks(sky_copy);
+    for (ExtraCopy& ec : extra_copies) copy_blocks(ec.copy);
     align8(g);
     uint32_t txld_start = uint32_t(g.size());
     std::vector<uint32_t> load_lists;
@@ -3584,17 +3865,15 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
         const Texture& t = out.textures[texture_of[m]];
         const rush2::gltf::Material* mat = m >= 0 && m < (int)scene.materials.size() ? &scene.materials[m] : nullptr;
         draw_materials.push_back({ &t, cutout_of[m], is_blend(m), !mat || (mat->wrap_s != 33071 && mat->wrap_t != 33071) });
+        draw_materials.back().mirror_s = mat && mat->wrap_s == 33648;
+        draw_materials.back().mirror_t = mat && mat->wrap_t == 33648;
         load_lists.push_back(uint32_t(g.size()));
         for (const auto& [w0, w1] : texture_load(t, mat, t.offset)) { add32(g, w0); add32(g, w1); }
         add32(g, 0xDF000000);
         add32(g, 0);
     }
-    if (stock_sky_model) {
-        for (const auto& [at, bytes] : sky_copy.loads) {
-            sky_copy.moved[at] = uint32_t(g.size());
-            copy_list(sky_copy, at, bytes, g, 0, uint32_t(g.size()));
-        }
-    }
+    if (stock_sky_model) copy_loads(sky_copy);
+    for (ExtraCopy& ec : extra_copies) copy_loads(ec.copy);
     uint32_t empty_list = uint32_t(g.size());
     add32(g, 0xDF000000);
     add32(g, 0);
@@ -3605,19 +3884,28 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
     std::vector<std::string> names;
     for (const Section& s : sections) names.push_back(s.name);
     if (!stris.empty() || stock_sky_model) names.push_back("SKYO1");
+    if (!seatris.empty()) names.push_back("FILLSEA");
     for (const Mover& m : movers) if (!m.model.empty()) names.push_back(m.model);
     for (const BillboardModel& b : billboard_models) names.push_back(b.name);
+    for (const ExtraCopy& ec : extra_copies) names.push_back(ec.section.name);
     names.push_back(prefix + "FINISH");
-    names.push_back(prefix + "FINISHB");
+    // FINISHB only as an empty stand-in: with a FINISH_BANNER it is left out, so a backward race's func_8008F080 falls
+    // back to FINISH, the model drawn (a list shared by two models would be relocated twice).
+    if (btris.empty() || gates.empty()) names.push_back(prefix + "FINISHB");
     std::sort(names.begin(), names.end(), [](const std::string& a, const std::string& b) { return strncmp(a.c_str(), b.c_str(), 15) < 0; });
     uint32_t model_table = uint32_t(g.size());
     g.resize(g.size() + names.size() * 0x34, 0);
     uint32_t texture_table = uint32_t(g.size());
-    for (const char* tn : { "CHKPNT", "FINISH" }) {
-        add_name(g, tn);
+    // Entry +0x18 is the texture-load list func_8008F080 swaps (empty without a FINISH_BANNER).
+    auto load_list_of = [&](int material) {
+        auto it = std::find(used_materials.begin(), used_materials.end(), material);
+        return material >= 0 && it != used_materials.end() ? load_lists[size_t(it - used_materials.begin())] : empty_list;
+    };
+    for (int k = 0; k < 2; k++) {
+        add_name(g, k ? "FINISH" : "CHKPNT");
         add16(g, 0); add16(g, 0);
         add32(g, 0xFFFF);
-        add32(g, empty_list);
+        add32(g, load_list_of(k ? finish_material : chkpnt_material));
         add32(g, 0);
     }
     uint32_t palette_table = uint32_t(g.size());
@@ -3641,6 +3929,25 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
         g.insert(g.end(), m.vertices.begin(), m.vertices.end());
         align8(g);
         s.list = uint32_t(g.size());
+        for (size_t i : m.vtx_commands) m.list[i].second += base;
+        for (const auto& [w0, w1] : m.list) { add32(g, w0); add32(g, w1); }
+    }
+    Section sea_section;
+    if (!seatris.empty()) {
+        std::vector<int> all(seatris.size());
+        for (size_t i = 0; i < all.size(); i++) all[i] = int(i);
+        MeshList m;
+        m.cmd(0xE3001001, 0x00000000);          // no palette: the readers take the list's state from the list itself
+        emit_mesh(seatris, all, used_materials, draw_materials, Vec3{}, 1.0f,
+                  [&](MeshList& ml, size_t mi) { ml.cmd(0xDE000000, load_lists[mi]); }, m);
+        m.cmd(0xDF000000, 0);
+        align8(g);
+        uint32_t base = uint32_t(g.size());
+        g.insert(g.end(), m.vertices.begin(), m.vertices.end());
+        align8(g);
+        sea_section.name = "FILLSEA";
+        sea_section.list = uint32_t(g.size());
+        sea_section.radius = m.radius;
         for (size_t i : m.vtx_commands) m.list[i].second += base;
         for (const auto& [w0, w1] : m.list) { add32(g, w0); add32(g, w1); }
     }
@@ -3679,41 +3986,69 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
         for (size_t i : m.vtx_commands) m.list[i].second += base;
         for (const auto& [w0, w1] : m.list) { add32(g, w0); add32(g, w1); }
     }
-    if (stock_sky_model) {
-        const std::vector<uint8_t>& d = *sky_copy.src;
+    // A copied model's vertices (raised by `rise`, 1/16 ft; true if any hit the s16 limit), other lists and its own
+    // list, which `list` gets.
+    auto copy_model = [&](ModelCopy& c, float rise, uint32_t& list) {
+        const std::vector<uint8_t>& d = *c.src;
+        bool clipped = false;
         align8(g);
         uint32_t vtx_base = uint32_t(g.size());
-        if (sky_copy.vtx1 > sky_copy.vtx0) {
-            g.insert(g.end(), d.begin() + sky_copy.vtx0, d.begin() + sky_copy.vtx1);
+        if (c.vtx1 > c.vtx0) {
+            g.insert(g.end(), d.begin() + c.vtx0, d.begin() + c.vtx1);
             // The relocator's mirror pass follows the vertices from the list's first G_VTX while bit 15 of their +6
             // halfword says another follows (geometry.md 4.2): end the chain at the copy's last vertex.
             g[g.size() - 16 + 6] &= 0x7F;
-            // Sky models keep their world height (StockSky::ground): raised as far as this track's start is above
-            // the source track's, in 1/16 ft.
-            float rise = ((gates.empty() ? 0.0f : gates[0].pos[1]) - stock_sky(settings.sky)->ground) * 16.0f;
-            bool clipped = false;
-            for (size_t at = vtx_base; at + 16 <= g.size(); at += 16) {
+            for (size_t at = vtx_base; rise != 0.0f && at + 16 <= g.size(); at += 16) {
                 long y = std::lround(int16_t(uint16_t(g[at + 2] << 8 | g[at + 3])) + rise);
                 clipped |= y < -32768 || y > 32767;
                 y = std::clamp(y, -32768l, 32767l);
                 g[at + 2] = uint8_t(uint16_t(y) >> 8);
                 g[at + 3] = uint8_t(y);
             }
-            if (clipped) {
-                report.warning("The stock sky " + settings.sky + " is squashed at the game's height limit: FINISH (at " +
-                               fmt_ft(gates[0].pos[1]) + " high) is too far above or below the sky's own track.");
-            }
         }
-        for (const auto& [at, bytes] : sky_copy.subs) {
+        for (const auto& [at, bytes] : c.subs) {
             align8(g);
-            sky_copy.moved[at] = uint32_t(g.size());
+            c.moved[at] = uint32_t(g.size());
             g.insert(g.end(), d.begin() + at, d.begin() + at + bytes);
         }
         align8(g);
+        list = uint32_t(g.size());
+        copy_list(c, c.list, c.list_bytes, g, vtx_base, list);
+        return clipped;
+    };
+    if (stock_sky_model) {
+        // Sky models keep their world height (StockSky::ground): raised as far as this track's start is above the
+        // source track's, in 1/16 ft.
+        float rise = ((gates.empty() ? 0.0f : gates[0].pos[1]) - stock_sky(settings.sky)->ground) * 16.0f;
         sky_model.name = "SKYO1";
-        sky_model.list = uint32_t(g.size());
         sky_model.radius = sky_copy.radius;
-        copy_list(sky_copy, sky_copy.list, sky_copy.list_bytes, g, vtx_base, sky_model.list);
+        if (copy_model(sky_copy, rise, sky_model.list)) {
+            report.warning("The stock sky " + settings.sky + " is squashed at the game's height limit: FINISH (at " +
+                           fmt_ft(gates[0].pos[1]) + " high) is too far above or below the sky's own track.");
+        }
+    }
+    for (ExtraCopy& ec : extra_copies) copy_model(ec.copy, 0.0f, ec.section.list);
+    // Each extra record is a child of the opaque section nearest it (the one whose cell it is in, if any), as a
+    // stock track's keys are children of their section: the game culls and draws them with it, so the section's box
+    // and radius grow to hold it (a coin over a jump can be far above the section's ground).
+    std::map<int, std::vector<const rush2::track_mod::Extras::Record*>> children_of;
+    for (const auto* r : extra_records) {
+        Vec3 p = { r->pos[0], r->pos[1], r->pos[2] };
+        int best = -1;
+        for (size_t s = 0; s < sections.size(); s++) {
+            if (sections[s].late) continue;
+            if (best < 0 || dist_xz(sections[s].origin, p) < dist_xz(sections[size_t(best)].origin, p)) best = int(s);
+        }
+        if (best < 0) continue;
+        Section& s = sections[size_t(best)];
+        constexpr float margin = 10.0f;     // ft around the record's point
+        Vec3 rel = sub(p, s.origin);
+        for (int c = 0; c < 3; c++) {
+            s.lo[c] = std::min(s.lo[c], rel[c] - margin);
+            s.hi[c] = std::max(s.hi[c], rel[c] + margin);
+        }
+        s.radius = std::max(s.radius, length(rel) + margin);
+        children_of[best].push_back(r);
     }
     for (Mover& mv : movers) {
         if (mv.model.empty()) continue;
@@ -3761,6 +4096,30 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
         for (size_t i : m.vtx_commands) m.list[i].second += base;
         for (const auto& [w0, w1] : m.list) { add32(g, w0); add32(g, w1); }
     }
+    // The finish banner: <prefix>FINISH, placed at the FINISH gate (the placement's finish record).
+    Section finish_model;
+    if (!btris.empty() && !gates.empty()) {
+        std::vector<int> all(btris.size());
+        for (size_t i = 0; i < all.size(); i++) all[i] = int(i);
+        MeshList m;
+        m.cmd(0xE3001001, 0x00000000);
+        m.cmd(0xE3000F00, 0x00000000);
+        m.cmd(combine[0], combine[1]);
+        m.cmd(0xD7000002, 0xFFFFFFFF);
+        emit_mesh(btris, all, used_materials, draw_materials, gates[0].pos, 16.0f,
+                  [&](MeshList& ml, size_t mi) { ml.cmd(0xDE000000, load_lists[mi]); }, m);
+        m.cmd(0xE3001001, 0x00008000);
+        m.cmd(0xDF000000, 0);
+        align8(g);
+        uint32_t base = uint32_t(g.size());
+        g.insert(g.end(), m.vertices.begin(), m.vertices.end());
+        align8(g);
+        finish_model.name = prefix + "FINISH";
+        finish_model.list = uint32_t(g.size());
+        finish_model.radius = m.radius;
+        for (size_t i : m.vtx_commands) m.list[i].second += base;
+        for (const auto& [w0, w1] : m.list) { add32(g, w0); add32(g, w1); }
+    }
     align8(g);
     uint32_t name_table = uint32_t(g.size());
     for (size_t i = 0; i < names.size(); i++) {
@@ -3768,12 +4127,18 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
         for (const Section& s : sections) if (s.name == names[i]) sec = &s;
         for (const Mover& mv : movers) if (mv.model == names[i]) sec = &mv.section;
         for (const BillboardModel& bm : billboard_models) if (bm.name == names[i]) sec = &bm.section;
+        if (finish_model.list && names[i] == prefix + "FINISH") sec = &finish_model;
+        if (!seatris.empty() && names[i] == "FILLSEA") sec = &sea_section;
+        uint16_t behaviour = 0;                      // a plain model
+        for (const ExtraCopy& ec : extra_copies) {
+            if (ec.section.name == names[i]) { sec = &ec.section; behaviour = ec.behaviour; }
+        }
         uint32_t r = model_table + uint32_t(i) * 0x34;
         put32(g, r, 1);                              // one LOD
         put32(g, r + 4 + 8, sec ? sec->list : empty_list);
         add_name(g, names[i]);
         addf(g, sec ? sec->radius : 1.0f);
-        add16(g, 0);                                 // behaviour: plain model
+        add16(g, behaviour);
         add16(g, 0);
     }
     const uint32_t header[10] = { model_table, name_table, texture_table, palette_table, uint32_t(names.size()), 2, 0,
@@ -3791,6 +4156,13 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
     for (size_t j = 0; j < movers.size(); j++) if (!movers[j].model.empty()) mover_records.push_back(int(j));
     size_t first_billboard = sections.size() + 1 + mover_records.size();
     size_t records = first_billboard + billboards.size();
+    // The extra records follow the top-level chain, each section's together (the stock files' pre-order).
+    std::map<int, size_t> first_child;
+    size_t child_at = records;
+    for (const auto& [s, kids] : children_of) {
+        first_child[s] = child_at;
+        child_at += kids.size();
+    }
     for (size_t i = 0; i < records; i++) {
         bool is_finish = i == sections.size();
         const Mover* mv = i > sections.size() && i < first_billboard ? &movers[mover_records[i - sections.size() - 1]] : nullptr;
@@ -3818,10 +4190,26 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
             out.track.prop_records.push_back(r);
         }
         add16(pl, uint16_t(i + 1 < records ? int16_t(i + 1) : int16_t(-1)));
-        add16(pl, 0xFFFF);
+        auto child = first_child.find(int(i));
+        add16(pl, !is_finish && !mv && !bb && child != first_child.end() ? uint16_t(child->second) : 0xFFFF);
         add32(pl, 0);
         for (int k = 0; k < 6; k++) addf(pl, is_finish || mv || bb ? 0.0f : (k < 3 ? sections[i].lo[k] : sections[i].hi[k - 3]));
         if (mv) out.track.path_records.push_back({ int(mv - movers.data()), 0, int(i) });
+    }
+    // A class record (a key) holds its world position: the placement walker makes a breakable's position relative to
+    // its parent (func_80081790), as with the stock tracks' keys (src/rush1/track1_convert.cpp).
+    for (const auto& [s, kids] : children_of) {
+        for (size_t j = 0; j < kids.size(); j++) {
+            const auto& r = *kids[j];
+            add_name(pl, r.name);
+            for (float f : r.m) addf(pl, f);
+            for (float f : r.pos) addf(pl, f);
+            add32(pl, 0x40);
+            add16(pl, uint16_t(j + 1 < kids.size() ? int16_t(first_child[s] + j + 1) : int16_t(-1)));
+            add16(pl, 0xFFFF);
+            add32(pl, 0);
+            for (int k = 0; k < 6; k++) addf(pl, 0.0f);
+        }
     }
 
     // ---- moving objects' paths: a 2049 file with one PTHD chunk (movers.md; movers::parse_paths reads it) ----

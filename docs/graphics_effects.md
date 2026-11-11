@@ -13,6 +13,8 @@ runs. It is a change to RT64, kept in `lib/patches/rt64.patch` (edit under `lib/
 | Car Reflections (`car_reflections`) | 5% to 100%, steps of 5 | 70% | `RT64::CarReflectionStrength` (0 to 1) |
 | Car Lighting (`car_lighting`) | Original, Light Probes | Original | none: game side only (`rush2::probes::set_mode`, [Car light probes](#car-light-probes)) |
 | Sky Fog (`sky_fog`) | Off, On | Off | none: the game marks each race view with `gEXSetSkyFog` ([Sky fog](#sky-fog)) |
+| Car Lights (`car_lights`, not in the menu: TODO.txt) | Off, On | Off | none: the game places light markers with `gEXSetCarLight` ([Car lights](#car-lights)) |
+| Fill Scenery Gaps (`scenery_fill`) | Off, On | Off (Enhanced setup: On) | none: `gEXSetTwoSidedWalls` around the track's models, and the game draws the ground underlay ([Fill scenery gaps](#fill-scenery-gaps)) |
 
 The option lives in `src/config.cpp` (`add_ambient_occlusion_option`). The global is
 declared in `lib/rt64/src/common/rt64_enhancement_configuration.h` and read every frame by
@@ -273,6 +275,64 @@ a fixed cube (above white, +x green, the rest dark gray): the roof lit, the tail
 left, the game's x points left) green. Checked 2026-10-14: the cube on a Rush 2 car (Seattle) and a Rush 2049 car
 (NY Two), Presidio's tunnel start against Original, and the bake times above in game.
 
+## Car lights
+
+**Not in the menu and never on** (src/config.cpp registers no option; TODO.txt, General) until the lens glow below
+works. Car Lights = **On** was: on a night track, a braking car's brake lights cast red light on the road and
+whatever else is close behind it (src/car_lights.cpp, lib/rt64 `CarLightPS.hlsl`). It replaces a first try that drew
+the PlayStation SF Rush's flare sprites at guessed points, which didn't sit on the cars' real lights.
+
+- **Night tracks:** `rush2::track2049::night_race`, a converted course (Rush 2049, custom, arcade) whose fog color is
+  near black (luminance under 0.1). Rush 2049's fog table (main 0x80114658, 3 bytes per track) is gray-blue for the
+  day tracks (0.55-0.61) and black for race tracks 4 and 6 (Presidio) and the stunt and battle arenas; the SF Rush
+  PlayStation night versions set #080808. Stock Rush 2 courses never take it.
+- **When:** while Rush 2 lights the car's tail lights itself (braking, the car's flags 0x1000 set and 0x10 clear:
+  func_800599A0, read in its hook `rush2_calspeed_brake_lights`), so the light and the lenses come on together. A
+  side goes out once its rear corner's panel (panel 2 rear right, 3 rear left: car state +0xE4, masks 0x800CE188,
+  shifts 0x800CE180) is damaged at all: level 1, the most collisions give (func_8006B730, func_8009A264 and
+  func_800715E8 stop at `slti 2`), the level that swaps in its damaged model. A wrecked car, a car out of the race
+  and a ghost show none.
+- **Where:** the middle of what the game lights on that side, found from the car's own drawing
+  (`Finder`, one car a frame, again when its type, parts or damage stage change): its body lists (frame, corners,
+  top: `rush2::car_types::part_record`) walked with their texture state (G_SETTIMG, G_SETTILE, G_LOADBLOCK /
+  G_LOADTILE, G_SETTILESIZE, G_TEXTURE), and each lit texel put back on its triangle by the triangle's texture
+  coordinates (barycentric), averaged per side of the body (x sign). Lit texels: Rush 2's palette lighting's CI8
+  entries 161-175 (Rush 2's cars, Rush 2049's on the N64 ROM); for a California Speed or Dreamcast car the texels its
+  lit copies change (`rush2::car2049::brake_light_sources`). A mod car's or livery's brake light lists
+  (docs/car_mods.md#brake-lights) are its lights instead, each triangle by its area. The light sits 0.3 ft behind that
+  point. Cars with no brake lights in the game (the SF Rush PlayStation cars) cast none.
+- **Only backward:** it is a tail light, not a glow round the car. The light shines in a cone straight back along the
+  car (the marker's world transform's third row, negated: `CarLightCB::direction`), full on that axis and fading to
+  nothing 70 degrees off it, so the road and a car close behind take it and the car it is on (its body, roof and
+  bumper, all ahead of or beside the lens) doesn't. A light shining every way lit its own car's whole body.
+- **Drawing:** each lit side is a marker placed through `rush2::battle_render` (slots 186-201, model `CAR_LIGHT` at
+  0x80E1F200: a sliver of a triangle between `gEXSetCarLight(31, 2, 1, 48, 192)`, red at 3x strength over 12 ft, and
+  its end), so it rides with the car through frame interpolation. The pass multiplies what is drawn, so the strength is
+  high for the dark night roads: 1.5x over 10 ft left them unchanged. RT64 doesn't draw a marker (`InstanceDrawCall::triangles.carLightIndex`); it takes
+  the origin of the marker's interpolated world transform (`lerpWorldTransforms`) as a light, relative to the camera
+  through the same reconstruction Sky Fog uses (`viewReconOf`), and once the view's 3D draws end (its next 2D draw or
+  the end of the scene, after ambient occlusion) runs `CarLightPS` over the screen box of the cube round the light's
+  reach: each pixel's position from the depth buffer, light falling off as (1 - d / 12 ft)^2, times the cone, times
+  0.35-1 by how squarely the surface faces the light, and the pipeline multiplies it in and adds it (dst * (1 + light), blend
+  DEST_COLOR / ONE), so a surface brightens by its own color: the road turns red, black stays black. The pipelines are
+  made with the shader library at startup, so the first light doesn't hitch.
+- **Glowing lenses (broken, the reason the option is out):** in game the parts drawn after the overlay (the left
+  rear corner, the roof) came out black, with the parts' texture commands replayed after it or not.
+  `RUSH2_CAR_LIGHTS_DIAG_SKIP=1` leaves the overlay out (the car is right then); `RUSH2_CAR_LIGHTS_DIAG_NOTEX=1`
+  draws it without its mask load, the next thing to try. The design: on a converted track every car part is multiplied by the track's car light color
+  (`rush2::car2049::light_model`, dark on a night track), so Rush 2's lit tail light texels (0xF801) came out a dull
+  dark red. While a side's light shines, each body part holding lit texels (the finder keeps their triangles: part,
+  side, vertices, texture coordinates state) is followed in the model draw hook (`rush2::car_lights::model_draw`, after
+  light_model in src/widescreen.cpp, so it has the part's own matrix) by those triangles again: an IA8 mask of the lit
+  texels laid over the part's own tile (size, wrap and G_TEXTURE scale copied), PRIM = Rush 2's lit red, no shade or
+  fog, blended as a decal (G_RM_ZB_XLU_DECAL2) inside a push and pop of the other mode, combiner and PRIM. Masks and
+  lists sit above 16 MB (`recomp::alloc`, read through `gEXSetRDRAMExtended`), two 32 KB buffers a car written in turn.
+  A mod car's or livery's brake light lists need none: they already draw unshaded (`brake_render_mode`).
+- **Testing:** `RUSH2_CAR_LIGHTS_LOG=1` prints each car's light points as they are found and each light turning on or
+  off; `RUSH2_CAR_LIGHTS_TEST=1` lights every car as if braking. For example `tools/test_race.py chinatown_night
+  --cars 3 --mod-dir <PS1 mod> --config graphics.car_lights=On --env RUSH2_CAR_LIGHTS_TEST=1 --shots 24,28,31,34,38`
+  (shot times from launch).
+
 ## Sky fog
 
 Settings > Graphics > Sky Fog = **On**: the race's sky is hazed toward the fog color by height above the horizon, as
@@ -336,6 +396,169 @@ or a w not above 0: the dome's prim depth 0x7FFE included) and returns the fog c
 
 Limits: blended draws without depth writes drawn before a Rush 2 dome (under its rim) are hazed as sky; the haze
 follows the camera's height, not the world's (the world's fog doesn't either).
+
+## Fill scenery gaps
+
+Settings > Graphics > Fill Scenery Gaps = **On** (Off is the original game; the Enhanced setup turns it on,
+`rules()` in src/setup.cpp): the tracks were built for a 4:3 view from the road, so a wide screen, a high camera or
+the wings see past where the scenery ends, sky under the edges of the ground and through open-backed buildings. Two
+parts, both decided per frame (hot-swappable). Code: `src/scenery_fill.cpp` (game), `src/scenery_fill_build.cpp`
+(the underlay, nothing of the game), `include/scenery_fill.h`.
+
+**Which draws are the track.** `race_load_track_800A5110` calls `placement_walk_80081790` at 0x800A5704, which makes a
+scene node per placement record; the scene node count (0x800FAE58) before the call and after it returns (hooks at
+0x800A5704 and 0x800A570C, `rush2_scenery_fill_walk_begin` / `_end`) bounds the track's nodes: sections, props,
+signs. The sky model (`sky_setup_800A45A8`) and the cars are made elsewhere. `rush2::scenery_fill::model_draw` (from
+`rush2_model_draw`, model_draw_8007AA48 at 0x8007AF84, $s7 = node) acts on those nodes only, in a race (game states
+3, 6, 9, 10).
+
+**Two-sided walls** (RT64, `lib/patches/rt64.patch`): each track node's model list is called between
+`gEXSetTwoSidedWalls(1)` and `(0)` (`G_EX_SETTWOSIDEDWALLS_V1` 0x38). In `RSP::drawIndexedTri`, a triangle drawn with
+culling on whose face is within about 17 degrees of vertical (|n.y| < 0.3 |n|, from its vertices through the world
+transform: the game keeps the view's rotation in the projection matrix, so the modelview's axes are the world's, y up)
+gets its indices pushed again in reverse order: whichever side faces the camera survives the culling, with the front's
+texture and vertex colors. Exact per triangle, no shader change (the render flag word is full). **A face that already
+has a back side is left alone.** Every other model in a race is called between `gEXSetTwoSidedWalls(2)` and `(0)`:
+its triangles are seen but get no copies. The frame's near-vertical triangles in marked draws are kept by plane
+(facing yaw in 128 steps, plane distance in steps of 8 units) with their corners, and a triangle gets no copy, and
+copies already made there are made degenerate (so the triangle count stays the same every frame, which frame
+interpolation matches draws by), when its plane has over it (overlap in the plane, by separating axes):
+- a modeled back: a triangle facing the other way within 16 units (1 ft), culled or not;
+- a two-sided surface: a triangle drawn without culling, either facing, within 16 units;
+- a layered face: a culled triangle facing the same way within 2 units, overlapping by more than half a unit (an arrow
+  over a sign board): their copies would fight each other from behind.
+History (2026-11-08): copies fought or beat real backs three times. Hawaii's start banner (its back isn't split into
+the same triangles as its front, so matching exact corners missed it), and Civic Dreamcast's blinking arrow signs
+(z-fighting with the plane match limited to culled backs 1/8 ft away); the user's rule: zero unintended z-fighting.
+
+**One-way road blocks** (issue 62, 2026-11-10): some barricades are one-sided on purpose, so they hide from behind.
+New York Downtown's N.Y.P.D. barricade (texture `NYONEBPARK1.11`, drawn in ~45 of its section models) closes the road
+back onto the Brooklyn Bridge (the `NYONECHALL7` one, game (-1571, 104, -352)) and side streets; from the bridge's
+offramp the original shows the road through it, and a two-sided copy put a mirrored barricade across the road. Such
+textures never get copies:
+- `one_sided_hashes` (include/scenery_fill.h) lists their RT64 replacement hashes (as Dump Textures' hashes.txt has
+  them: NYONEBPARK1.11 = `2E93790202DA2D0A`). The underlay build (`rush2::scenery_fill::build`) finds them in the
+  track's container and keeps their texels' file offsets, mipmap levels included (`Mesh::one_sided`, cached with the
+  underlay).
+- `model_draw`, before each view's first track model, sends the RDRAM address of each (the geometry's slot record
+  data pointer + offset) with `gEXSetTwoSidedSkip(address)` (`G_EX_SETTWOSIDEDSKIP_V1` 0x3A; RT64 empties the list at
+  each display list's start), once the first 8 bytes there are the file's (the worker can run before the game has
+  loaded the track).
+- RT64 keeps the texture image address of the last `G_LOADBLOCK` / `G_LOADTILE` (`RDP::extended.lastTexelLoad`;
+  palette loads don't count) and makes no copy of a triangle drawn while it is a listed address.
+Test: `python tools/test_race.py 1 --cars 0 --drones 1 --user-settings --seconds 60 --shots 45,55 --script "1:B:59"
+--env RUSH2_CS_PLACE=-1470,112,-255,-0.71,-0.70,0,0.5` stops the car on the offramp facing the gate (the log says
+`[Fill] Two-sided walls leave out 1 of 1 one-sided textures`); add `--exe .release/build/Rush2Recompiled.exe` for a
+build without it. `tools/rdram_find.py PID --file ASSET --offset OFS` finds where the game put an asset's bytes.
+
+**Extended ground.** A ground underlay built from the raced track's own models (the same inputs as the
+[car light probes](#car-light-probes): the slot's geometry and placement assets as loaded, `rush2::probes::raced_track`,
+and the shared containers 0x12 and 0x14, through `rush2::catalog::for_each_placed_triangle`):
+1. A 32 ft grid over the ground and 4000 ft past it. A cell is covered where an upward-facing triangle (normal y over
+   0.5) lies over its center; it takes the lowest such surface's height, vertex color and texture.
+   **Roofs with no floor under them** are not ground: a group of covered cells (neighbors joined where their heights
+   are within 24 ft, a dome's curve) of at most 100 cells that stands over 20 ft above all the covered ground within 4
+   cells (128 ft) of it, water textures left out, stops counting as covered, so the ground round it fills in under it
+   (the floors, step 5, keep it under the roof). A group with no ground near (an island, a pier over a sea plane) stays
+   ground. Reported 2026-11-10: the PlayStation Golden Gate's rotunda (Palace of Fine Arts) has no floor under its dome,
+   so the dome was the lowest surface in its cells and the underlay rose to it as a green cone, in every time of day.
+   On the stock tracks the rule takes building roofs and towers (the Space Needle's top) and fills sky gaps beside
+   them (LA); checked against the build without it with `car_probes_test --fill` on every Rush 2, SF Rush and PS1 track.
+2. Heights and colors of the rest by pull-push (a pyramid of averages, then each empty cell blended from the level
+   above): the ground carries on smoothly from its edges and flattens far away.
+3. Textures: the ground textures covering the most cells (up to 8, each at least 2% of the ground), each one's coverage
+   pull-pushed the same way; each cell takes the strongest. Big areas (grass, water, sand) carry on. Taking the
+   nearest covered cell's texture instead drew roads that reach the edge on out as stripes.
+4. Drawn: the fine layer, the empty cells within 10 cells (320 ft) of the ground and the covered cells beside them,
+   out to whole 256 ft cells; the coarse layer, the 256 ft cells with no ground or fine cells in them, out to the
+   margin. The two never overlap: a coarse quad under fine ones had to come down to the lowest of them, on a shore the
+   sea's level, which stood the land over it on a wall. Where the fine layer ends over a lower coarse surface, each
+   outer fine edge hangs a **skirt** down to it (the coarse height there less 1 ft), so the sky never shows through the
+   step (steep slopes, seen in game on Golden Gate snow).
+5. **Never through the track**: every triangle drawn, whichever way it faces, sets a floor on each cell it overlaps (a
+   lower bound of its height there: the larger of its plane's lowest at the cell's corners and its lowest vertex). A
+   fine corner sits 2 ft under the heights and floors of its four cells, a coarse corner 6 ft under the fine corners
+   within a coarse cell of it that touch the track (its ground or any of its triangles), so every quad (a mix of its
+   corners) stays under everything over its cell; far from the track a coarse corner follows its own height. Heights
+   from upward faces alone let the sheet come up through embankments and walls falling away from a road's edge
+   (Chinatown, reported 2026-11-08).
+6. **The sea**: a custom track's `SEA` mesh ([custom tracks](custom_tracks.md#sea): model FILLSEA, never placed) and a
+   [diorama's](#diorama-guides) water. A cell over the sea is sea, at its height and with its texture, unless the
+   track's own ground there is within 30 ft of it (a quay, a ship's deck); higher ground is a deck over it (a bridge),
+   with the sea drawn under. The sea is left out of the texture vote and the color fill (it turned the inland city to
+   water), and only the track's own ground counts as covered, so open sea is drawn coarse.
+
+**Pages of pictures.** A texture of which a triangle maps only a rectangle (the corners' span in texels, whole repeats
+taken out, under 3/4 of the texture on an axis) is a source of its own: that rectangle, resampled (nearest) to 16-64
+texels a side. The PlayStation SF Rush's textures are pages of many pictures (the converter's 32 x 32 tiles of its 256 x
+256 pages, the pictures at any offset), each face a quad mapping one; the whole page repeated drew a patchwork of
+facades and fences over the snow. Only the textures the strips draw are kept.
+
+### Diorama guides
+
+Every Rush 2 and SF Rush track's track select diorama is a small model of the course and what lies round it: the
+red route line, the sea, parks, city, beach, hills. `src/scenery_fill_guide.cpp` lays it over the track and the
+builder follows it past the track's own ground (reported 2026-11-10: Golden Gate's ground carried on as a dome with a
+bump where the bay is, Embarcadero's city texture ran on under the ships).
+
+- **The fit** (`fits` in src/scenery_fill_guide.cpp, made with `tools/diorama_fit.py`): a similarity transform (scale,
+  turn, mirror, offset) that lays the diorama's red route line (triangles whose color is mostly red) over the track's
+  AI path, seen from above: a search over turns and mirroring, then ICP both ways. Mean distances 36-300 ft against
+  courses 4,000-13,000 ft long. Rush 2's eight race tracks (NY One is NYLTRACK, NY Two NYUTRACK), SF Rush's seven
+  (TRK1O2 ... TRK7O5, from its asset 10 through `rush2::track1::convert_container`), their arcade versions (Rush The
+  Rock: the N64 frames, within a few feet; arcade Sunset's shorter figure 8 fit badly on its own, so it takes the N64
+  fit too) and the PlayStation versions of tracks 1-3 (the N64 courses turned a quarter, fitted on their own; the
+  snow and night ones carry the PlayStation's water colors). The stunt and battle arenas' dioramas have no route line.
+- **Kinds** by the diorama's color (its texture's mean times its vertex colors): route (red), water (blue), green,
+  sand (tan, brown), city (the rest: greys, whites). Per 32 ft cell: the lowest land surface (a building stands on the
+  ground) gives the kind and the lie; water where only water is there. Past the diorama's edge both carry on from it
+  by pull-push (the sea round an island stays sea).
+- **Sea**: the diorama's water where the track has no ground, at the track's own water (its blue textures under the
+  diorama's water: the commonest one, at its median height), else the SEA mesh's, else a flat texture of the version's
+  water color (FILLWATER, with a faint ripple) 4 ft under the lowest ground within 320 ft of the water.
+- **Lie**: the diorama's land height times a factor fitted (least squares, 0 to 1) to the track's ground where both
+  are (the dioramas' hills are drawn taller: 0.2-0.7 on hilly courses, 0 on the flat city ones, 1 on The Rock and
+  Alcatraz), plus the track's ground's difference from that, filled in from where it is known (land only: the sea's
+  level pulled the land down to it a few hundred feet out). Land within 12 cells (384 ft) of the sea slopes down to the
+  sea's level (smoothstep), a shore instead of a cliff.
+- **Textures**: each kind of land takes the track's commonest texture in the diorama's areas of that kind, weighted by
+  how near its hue (color over brightness, so snow and night versions compare alike) is to the diorama's there
+  (1 / (1 + (d / 0.1)^2)), never a water texture (Hawaii's sea plane is the lowest surface under its land) or a
+  striped one (texels changing over twice as much across one axis as along the other: lane lines measure 2.5-7, ground
+  1.0-1.2; a city's streets repeated over the city drew lane lines across it). A kind with under 20 cells of the
+  track's ground keeps the plain vote. The snow and night versions use their own pages, so their ground is snow or
+  dark.
+- **Game side**: `guide_key` (view_begin): an SF Rush track (`rush2::track1::race_track`) is `sfrush:<n>`, a custom
+  track its folder (`rush2::track_mod::race_folder`), a stock Rush 2 slot `rush2:<SLOT>`; the worker reads the
+  diorama containers once (Rush 2's asset 3, SF Rush's asset 10) and the guide's hash joins the cache key.
+- **Offline**: `car_probes_test --fill --guide 2 r1:1 dir:<converted>=<key>` (r1:N converts SF Rush track N from
+  RUSH1_ROM) also writes `tmp/scenery_fill/<TRACK>_guide.glb`, the diorama as laid in its kinds' colors.
+
+The textures are the track's own, re-encoded in their own format and palette (`encode_texture`, checked by decoding
+them as RT64 does, `image_of`, against the catalog's image), so texture packs replace them by content
+([derived replacements](texture_upscaling.md)); textures that aren't a power of two or don't fit one TMEM load are
+left out. Texel size in the world comes from the texture's upward triangles (world area over UV area); the coarse
+layer doubles it until a cell fits a vertex's s10.5 range. Output: chunks (16 x 16 fine or 4 x 4 coarse cells) of
+strips (rows of up to 15 quads, 32 vertices). The stock tracks build in about 0.02 s to 0.5 to 2.5 MB, 10,000 to
+40,000 quads.
+
+**Game side.** `view_begin` (from `rush2_interp_view_begin`) starts a worker when the raced track changes: it loads
+the underlay from the track cache (`scenery_fill_<hash>` blob, keyed on the inputs' bytes and `build_version`) or
+builds and saves it, then writes it into one of two 4 MB arenas from `recomp::alloc` (above 16 MB, used in turn so a new
+track never overwrites the one drawn): per texture a load list (TEXTLUT, LOADTLUT, LOADBLOCK, render tile), per chunk
+its vertices (s16 in 1/16 ft from the chunk's center) and a list of G_VTX / G_TRI2. In each view, before the first
+track model drawn (after the sky models, which draw first without depth; before the rest of the world), `model_draw`
+calls the view's list between `gEXSetRDRAMExtended(1)` and `(0)`: the chunks in front of the camera and within the
+view's far plane (view +0x38 times the draw distance factor), each in a matrix group of its own
+(0x7vgggccc: view, view generation, chunk) under a float matrix loaded as the whole modelview (translate (center -
+camera) x 16, times the view's root modelview), as `src/rush2049/battle_render.cpp` does. Its render state sits
+between `gEXPush/PopGeometryMode`, `OtherMode` and `CombineMode`: 2-cycle, TEXEL0 x SHADE, `G_RM_FOG_SHADE_A` +
+`G_RM_AA_ZB_OPA_SURF2`, fog and depth like the track, no culling (a mirrored race needs none); the palette cache
+(0x80111954) is cleared after, as the battle models do.
+
+Offline: `tools/car_probes_test.cpp --fill [--guide] [TRACK ...]` (build with `tools\car_probes_test.bat`) prints each
+track's underlay size and writes `tmp/scenery_fill/<TRACK>.glb`, the track with the underlay as node SCENERYFILL, for
+`tools/glb_view.py`. TRACK: a Rush 2 slot, `r1:N`, or `dir:<folder>` (tools/track_mod_test output).
 
 ## Soft particles (removed)
 

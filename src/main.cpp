@@ -52,6 +52,7 @@
 #include "librecomp/rsp.hpp"
 
 #include "rush2.h"
+#include "assets.h"
 #include "arcade2049.h"
 #include "light_bar.h"
 #include "online.h"
@@ -556,13 +557,15 @@ void reorder_texture_pack(recomp::mods::ModContext&) {
 // --input-script "<seconds>:<button>[:<hold seconds>],..." presses N64 buttons at fixed times after
 // launch, on top of real input (used for automated testing). Buttons: A B Z START L R CU CD CL CR DU DD DL DR, plus SL
 // and SR for the stick fully left and right (to steer), for controller 1, or with a P2-P4 prefix (P2START) for
-// controllers 2-4.
+// controllers 2-4. A time written T<seconds> (T3:START) counts from when the title screen first came up (front-end
+// screen 0x10) instead, so a script through the menus doesn't depend on how long the launch takes.
 struct ScriptedPress {
     double time;
     double duration;
     uint16_t button;
     int controller;
     float stick_x = 0.0f;
+    bool from_title = false;
 };
 static std::vector<ScriptedPress> input_script;
 static std::chrono::steady_clock::time_point launch_time = std::chrono::steady_clock::now();
@@ -582,7 +585,9 @@ static void parse_input_script(const std::string& script) {
         if (colon == std::string::npos) {
             continue;
         }
-        ScriptedPress press{ std::stod(entry.substr(0, colon)), 0.15, 0, 0 };
+        bool from_title = !entry.empty() && entry[0] == 'T';
+        ScriptedPress press{ std::stod(entry.substr(from_title ? 1 : 0, colon - (from_title ? 1 : 0))), 0.15, 0, 0 };
+        press.from_title = from_title;
         std::string name = entry.substr(colon + 1);
         size_t colon2 = name.find(':');
         if (colon2 != std::string::npos) {
@@ -623,8 +628,19 @@ static bool get_n64_input(int controller_num, uint16_t* buttons, float* x, float
     }
     if (!input_script.empty() && !ultramodern::is_turbo()) { // in turbo a press would last seconds of race time
         double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - launch_time).count();
+        // When the title screen first came up (front_end_screen 0x800E7BC4 = 0x10), for T-timed presses.
+        static double title_at = -1.0;
+        if (title_at < 0.0) {
+            uint8_t* rdram = rush2::assets::rdram();
+            if (rdram != nullptr && MEM_H(0, (int32_t)0x800E7BC4) == 0x10) title_at = now;
+        }
         for (const auto& press : input_script) {
-            if (press.controller == controller_num && now >= press.time && now < press.time + press.duration) {
+            double at = press.time;
+            if (press.from_title) {
+                if (title_at < 0.0) continue;
+                at += title_at;
+            }
+            if (press.controller == controller_num && now >= at && now < at + press.duration) {
                 *buttons |= press.button;
                 if (press.stick_x != 0.0f) {
                     *x = press.stick_x;
@@ -656,6 +672,9 @@ static bool get_game_input(int controller_num, uint16_t* buttons, float* x, floa
 // on any computer.
 namespace {
     recompui::Element* launcher_menu = nullptr;
+    // The launcher page itself (its background and version line). Hidden whenever there is a ROM and nothing being
+    // built, so a launch goes from a black window straight into the game; shown for Locate ROM and the build screen.
+    recompui::Element* launcher_page = nullptr;
     recompui::Element* build_screen = nullptr;
     recompui::Label* build_label = nullptr;
     recompui::Element* build_fill = nullptr;
@@ -705,14 +724,16 @@ namespace {
         static bool hidden = false, shown = false;
         if (build_screen == nullptr) return ready;
         if (!hidden) {
-            hidden = true;   // a ROM located just now: its buttons go
+            hidden = true;   // a ROM located just now: its buttons go, and the page until something is built
             launcher_menu->set_visibility(Visibility::Hidden);
+            launcher_page->set_visibility(Visibility::Hidden);
         }
         rush2::prewarm::Progress p = rush2::prewarm::progress();
         if (!shown && !p.building) return ready;
         if (!shown) {
             shown = true;
             for (Element* b : launcher_buttons) b->set_visibility(Visibility::Hidden);
+            launcher_page->set_visibility(Visibility::Visible);
             launcher_menu->set_visibility(Visibility::Visible);
             build_screen->set_visibility(Visibility::Visible);
         }
@@ -758,9 +779,14 @@ static void launcher_init(recompui::LauncherMenu* menu) {
     }
     add_build_screen(game_options_menu);
     launcher_menu = game_options_menu;
-    // With a valid ROM the game starts once the build pass is over: the menu isn't shown meanwhile.
+    launcher_page = menu;
+    // With a valid ROM the game starts once the build pass is over: nothing of the launcher is shown meanwhile (a
+    // black window) unless the pass has something to build.
     std::u8string game_id = game.game_id;
-    if (recomp::is_rom_valid(game_id)) game_options_menu->set_visibility(recompui::Visibility::Hidden);
+    if (recomp::is_rom_valid(game_id)) {
+        game_options_menu->set_visibility(recompui::Visibility::Hidden);
+        menu->set_visibility(recompui::Visibility::Hidden);
+    }
     // Never Start Game: with a ROM the launcher starts the game itself (launcher_update).
     launcher_buttons.push_back(game_options_menu->add_start_game_or_load_rom_option("Locate ROM", "Locate ROM"));
     launcher_buttons.push_back(game_options_menu->add_exit_option());
@@ -773,6 +799,7 @@ static void launcher_update(recompui::LauncherMenu*) {
     if (started) {
         return;
     }
+    rush2::load_font_pack_early();
     // The ROM Locate ROM just stored: librecomp marks a ROM valid only when it checks the stored ones, so they're checked
     // again once the file is there, and the launcher goes straight on to the build pass and the game (it never offers
     // Start Game).
@@ -802,6 +829,12 @@ static void launcher_update(recompui::LauncherMenu*) {
     // Every car and track is built before the game starts (src/prewarm.cpp).
     rush2::prewarm::start(game_id);
     if (!show_build_progress(rush2::prewarm::ready())) {
+        return;
+    }
+    // The high-resolution fonts drawn from the game's first frame (rush2::load_font_pack_early): the window stays
+    // black until RT64 has the font pack, a fraction of a second, at most 2 s.
+    static const auto fonts_wait = std::chrono::steady_clock::now();
+    if (!rush2::font_pack_ready() && std::chrono::steady_clock::now() - fonts_wait < std::chrono::seconds(2)) {
         return;
     }
     started = true;

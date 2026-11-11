@@ -161,11 +161,10 @@ namespace {
             std::lock_guard lock{ track_source_mutex };
             track_sources[rom->is_dreamcast() ? 1 : 0] = rom;
         }
-        // A stored disc gives the N64 ROM its Dreamcast Textures too.
+        // A stored disc gives the N64 ROM's Dreamcast track versions the disc's full-size textures too.
         std::error_code ec;
         bool disc_stored = std::filesystem::exists(stored_pack_path(), ec);
         rush2::rom2049::dc::set_texture_sources(rom, disc_stored ? stored_pack_path() : std::filesystem::path());
-        rush2::upscale::set_dreamcast_option_state(rom != nullptr && rom->is_dreamcast(), disc_stored);
         rush2::wings::on_rom_changed();
         rush2::menus2049::source_changed();
     }
@@ -304,7 +303,7 @@ namespace {
                     recompui::message_box("Failed to open the disc image.");
                     break;
                 case ImportResult::NotADisc:
-                    recompui::message_box("This is not a Dreamcast disc image (.cdi, .gdi, .cue or .iso).");
+                    recompui::message_box("This is not a Dreamcast disc image (.cdi, .gdi, .cue, .chd or .iso).");
                     break;
                 case ImportResult::WrongGame:
                     recompui::message_box("This disc is not San Francisco Rush 2049.");

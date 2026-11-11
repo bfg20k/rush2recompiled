@@ -96,6 +96,15 @@ set(UPNPC_BUILD_SAMPLE OFF CACHE BOOL "" FORCE)
 set(UPNPC_NO_INSTALL ON CACHE BOOL "" FORCE)
 add_subdirectory(${CMAKE_SOURCE_DIR}/lib/miniupnp/miniupnpc ${CMAKE_BINARY_DIR}/miniupnpc)
 
+# CHD disc images (src/chd_image.cpp). libchdr decompresses with the zstd and miniz already built rather than its own
+# copies, which would clash with them at link time: zstd is rt64's (as a "system" zstd: cmake/zstd/zstdConfig.cmake),
+# and the existing "miniz" target (N64ModernRuntime's miniz 3.0) stands in for libchdr's miniz 3.1.2, whose
+# tinfl_decompressor (all libchdr uses) is the same.
+set(CHDR_WANT_TESTS OFF CACHE BOOL "" FORCE)
+set(WITH_SYSTEM_ZSTD ON CACHE BOOL "" FORCE)
+set(zstd_DIR ${CMAKE_SOURCE_DIR}/cmake/zstd CACHE PATH "" FORCE)
+add_subdirectory(${CMAKE_SOURCE_DIR}/lib/libchdr ${CMAKE_BINARY_DIR}/libchdr EXCLUDE_FROM_ALL)
+
 target_include_directories(rt64 PRIVATE ${CMAKE_BINARY_DIR}/rt64/src)
 
 # imgui trips -Wuninitialized-const-pointer, which recent clang treats as an error.
@@ -180,6 +189,9 @@ target_sources(Rush2Recompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/lod.cpp
     ${CMAKE_SOURCE_DIR}/src/draw_distance.cpp
     ${CMAKE_SOURCE_DIR}/src/sky_fog.cpp
+    ${CMAKE_SOURCE_DIR}/src/scenery_fill.cpp
+    ${CMAKE_SOURCE_DIR}/src/scenery_fill_build.cpp
+    ${CMAKE_SOURCE_DIR}/src/scenery_fill_guide.cpp
     ${CMAKE_SOURCE_DIR}/src/cheats.cpp
     ${CMAKE_SOURCE_DIR}/src/fonts.cpp
     ${CMAKE_SOURCE_DIR}/src/texture_upscale.cpp
@@ -200,6 +212,13 @@ target_sources(Rush2Recompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/arcade2049/arcade_cars.cpp
     ${CMAKE_SOURCE_DIR}/src/arcade2049/arcade_install.cpp
     ${CMAKE_SOURCE_DIR}/src/arcade2049/arcade_checkpoints.cpp
+    ${CMAKE_SOURCE_DIR}/src/arcade2049/arcade_collectibles.cpp
+    ${CMAKE_SOURCE_DIR}/src/chd_image.cpp
+    ${CMAKE_SOURCE_DIR}/src/sfrush_ps1/ps1_disc.cpp
+    ${CMAKE_SOURCE_DIR}/src/sfrush_ps1/ps1_track.cpp
+    ${CMAKE_SOURCE_DIR}/src/sfrush_ps1/ps1_diorama.cpp
+    ${CMAKE_SOURCE_DIR}/src/sfrush_ps1/ps1_cars.cpp
+    ${CMAKE_SOURCE_DIR}/src/sfrush_ps1/ps1_install.cpp
     ${CMAKE_SOURCE_DIR}/lib/Clipper2/CPP/Clipper2Lib/src/clipper.engine.cpp
     ${CMAKE_SOURCE_DIR}/lib/Clipper2/CPP/Clipper2Lib/src/clipper.offset.cpp
     ${CMAKE_SOURCE_DIR}/lib/Clipper2/CPP/Clipper2Lib/src/clipper.rectclip.cpp
@@ -223,6 +242,8 @@ target_sources(Rush2Recompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/linux_devices.cpp
     ${CMAKE_SOURCE_DIR}/src/linux_window.cpp
     ${CMAKE_SOURCE_DIR}/src/circuit.cpp
+    ${CMAKE_SOURCE_DIR}/src/explosive.cpp
+    ${CMAKE_SOURCE_DIR}/src/time_sprint.cpp
     ${CMAKE_SOURCE_DIR}/src/npc_cars.cpp
     ${CMAKE_SOURCE_DIR}/src/paint_colors.cpp
     ${CMAKE_SOURCE_DIR}/src/game_fixes.cpp
@@ -263,6 +284,9 @@ target_sources(Rush2Recompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/rush1/track1_audio.cpp
     ${CMAKE_SOURCE_DIR}/src/rush1/track1_buses.cpp
     ${CMAKE_SOURCE_DIR}/src/music.cpp
+    ${CMAKE_SOURCE_DIR}/src/music_streams.cpp
+    ${CMAKE_SOURCE_DIR}/src/stream_decode.cpp
+    ${CMAKE_SOURCE_DIR}/src/arcade2049/rock_music.cpp
     ${CMAKE_SOURCE_DIR}/src/announcer.cpp
     ${CMAKE_SOURCE_DIR}/src/sfx_sweep.cpp
     ${CMAKE_SOURCE_DIR}/src/pause_menu.cpp
@@ -282,6 +306,8 @@ target_sources(Rush2Recompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/surface_fx.cpp
     ${CMAKE_SOURCE_DIR}/src/rush2049/track2049.cpp
     ${CMAKE_SOURCE_DIR}/src/track_cache.cpp
+    ${CMAKE_SOURCE_DIR}/src/track_traction.cpp
+    ${CMAKE_SOURCE_DIR}/src/car_lights.cpp
     ${CMAKE_SOURCE_DIR}/src/race_time_model.cpp
     ${CMAKE_SOURCE_DIR}/src/prewarm.cpp
     ${CMAKE_SOURCE_DIR}/src/texture_prewarm.cpp
@@ -302,6 +328,7 @@ target_sources(Rush2Recompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/rush2049/menus2049.cpp
     ${CMAKE_SOURCE_DIR}/src/rush2049/stunt2049.cpp
     ${CMAKE_SOURCE_DIR}/src/arrows.cpp
+    ${CMAKE_SOURCE_DIR}/src/mod_car_shadow.cpp
     ${CMAKE_SOURCE_DIR}/src/rush2049/track2049_audio.cpp
     ${CMAKE_SOURCE_DIR}/src/rush2049/track2049_texanim.cpp
     ${CMAKE_SOURCE_DIR}/src/rush2049/car2049.cpp
@@ -313,6 +340,7 @@ target_sources(Rush2Recompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/rush2049/wings_rom.cpp
     ${CMAKE_SOURCE_DIR}/src/rush2049/wings_state.cpp
     ${CMAKE_SOURCE_DIR}/src/rush2049/wings_render.cpp
+    ${CMAKE_SOURCE_DIR}/src/rush2049/wings_contrails.cpp
     ${CMAKE_SOURCE_DIR}/src/rush2049/wings_sound.cpp
     ${CMAKE_SOURCE_DIR}/src/rush2049/wings_menu.cpp
     ${CMAKE_SOURCE_DIR}/rsp/aspMain.cpp
@@ -460,6 +488,7 @@ target_link_libraries(Rush2Recompiled PRIVATE
     recompinput
     librecomp
     ultramodern
+    chdr-static
     rt64
     nfd
 )

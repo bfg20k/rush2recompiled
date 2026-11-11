@@ -36,6 +36,7 @@
 #include "touch_controls.h"
 #include "car2049.h"
 #include "car_probes.h"
+#include "scenery_fill.h"
 #include "control_profiles.h"
 #include "setup.h"
 
@@ -474,6 +475,42 @@ static void add_sky_fog_option(recomp::config::Config& config) {
         });
 }
 
+// Car Lights (src/car_lights.cpp, docs/graphics_effects.md#car-lights) is off and out of the menu until its tail light
+// lens glow works (TODO.txt); a saved "car_lights" value is ignored on load.
+
+namespace scenery_fill_option {
+    const std::string id = "scenery_fill";
+    enum class SceneryFill : uint32_t { Off, On };
+
+    void apply(recomp::config::ConfigValueVariant value) {
+        rush2::scenery_fill::set_enabled(static_cast<SceneryFill>(std::get<uint32_t>(value)) == SceneryFill::On);
+    }
+}
+
+// Fill Scenery Gaps: ground carries on past the edges of a track's scenery and walls show from behind, filling the
+// holes a wide screen or a high camera sees (src/scenery_fill.cpp, docs/graphics_effects.md#fill-scenery-gaps).
+static void add_scenery_fill_option(recomp::config::Config& config) {
+    using scenery_fill_option::SceneryFill;
+
+    config.add_enum_option(
+        scenery_fill_option::id,
+        "Fill Scenery Gaps",
+        "Fills the holes where a track's scenery ends, which wide screens and high cameras show: the ground carries on "
+        "past its edges out to the horizon, and walls built to be seen from one side show from behind too. "
+        "<recomp-color primary>Off</recomp-color> matches the original game.",
+        {
+            { SceneryFill::Off, "Off", "Off" },
+            { SceneryFill::On, "On", "On" },
+        },
+        SceneryFill::Off
+    );
+
+    config.add_option_change_callback(scenery_fill_option::id,
+        [](recomp::config::ConfigValueVariant cur_value, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext) {
+            scenery_fill_option::apply(cur_value);
+        });
+}
+
 namespace car_lighting_option {
     const std::string id = "car_lighting";
 }
@@ -866,6 +903,28 @@ static void add_catch_up_option(recomp::config::Config& config) {
         });
 }
 
+namespace unlocked_opponents_option {
+    const std::string id = "unlocked_car_opponents";
+}
+
+// Unlocked Cars as Opponents: the computer cars' random car also draws from the hidden Rush 2 cars (TAXI to DEW) the
+// car select offered for the race (src/npc_cars.cpp, src/rush2049/car2049.cpp rush2_car49_drone).
+static void add_unlocked_opponents_option(recomp::config::Config& config) {
+    config.add_bool_option(
+        unlocked_opponents_option::id,
+        "Unlocked Cars as Opponents",
+        "The computer cars can also race the hidden Rush 2 cars (Taxi, Hot Rod, Formula, Prototype, Rocket and Mountain "
+        "Dew) that you have unlocked for the race. Off, as in Rush 2, they only race the 16 starting cars. Not used "
+        "in online races. Takes effect at the next race.",
+        false
+    );
+
+    config.add_option_change_callback(unlocked_opponents_option::id,
+        [](recomp::config::ConfigValueVariant cur_value, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext) {
+            rush2::npc_cars::set_unlocked_opponents(std::get<bool>(cur_value));
+        });
+}
+
 namespace torque_option {
     const std::string id = "torque_rebalance";
 }
@@ -1076,7 +1135,8 @@ void rush2::init_config() {
         // so showing one moves nothing in the others.
         create_ordered_tab(general::tab_name, "rush2_general", general::id, 3, {
             { "Gameplay", { car_stats_option::id, torque_option::id, stunt_gear_option::id, hide_respawn_option::id,
-                            hood_wheels_option::id, attract_camera_option::id, look_back_option::id, catch_up_option::id, pause_extras_option::id } },
+                            hood_wheels_option::id, attract_camera_option::id, look_back_option::id, catch_up_option::id, unlocked_opponents_option::id,
+                            pause_extras_option::id } },
             { "System", { general::options::background_input_mode, menu_background_option::id, data_location_option::id } },
             { "Circuits", { circuit_review_option::id, more_circuit_option::id, circuit_fixed_difficulty_option::id }, true },
             { "Other", { ghost_option::id, ghosts_kept_option::id, rush2::game_filter::option_id() } },
@@ -1113,8 +1173,8 @@ void rush2::init_config() {
         create_ordered_tab(graphics::tab_name, "rush2_graphics", graphics::id, 3, {
             { "Display", display_options },
             { "Quality", { graphics::options::msaa_option, anisotropy_option::id, mipmap_option::id, lod_option::id, draw_distance_option::id, font_option::id }, true },
-            { "Effects", { ambient_occlusion_option::id, sky_fog_option::id, car_lighting_option::id, car_sheen_option::id, car_reflections_option::id, reflection_blur_option::id, reflection_rate_option::id } },
-            { "Textures", { rush2::upscale::dreamcast_option_id, rush2::upscale::interface_option_id,
+            { "Effects", { ambient_occlusion_option::id, sky_fog_option::id, scenery_fill_option::id, car_lighting_option::id, car_sheen_option::id, car_reflections_option::id, reflection_blur_option::id, reflection_rate_option::id } },
+            { "Textures", { rush2::upscale::interface_option_id,
                             rush2::upscale::car_colors_option_id, rush2::upscale::mode_option_id,
                             rush2::upscale::command_option_id }, true },
         }, rush2::upscale::add_buttons);
@@ -1137,6 +1197,7 @@ void rush2::init_config() {
     add_attract_camera_option(general_config);
     add_look_back_option(general_config);
     add_catch_up_option(general_config);
+    add_unlocked_opponents_option(general_config);
     add_pause_extras_option(general_config);
     rush2::game_filter::add_option(general_config);
     rush2::touch::add_option(general_config);
@@ -1155,6 +1216,7 @@ void rush2::init_config() {
     add_anisotropy_option(graphics_config);
     add_ambient_occlusion_option(graphics_config);
     add_sky_fog_option(graphics_config);
+    add_scenery_fill_option(graphics_config);
     add_car_lighting_option(graphics_config);
     add_car_sheen_option(graphics_config);
     add_car_reflections_option(graphics_config);
@@ -1201,6 +1263,7 @@ void rush2::init_config() {
     RT64::AmbientOcclusionStrength = ambient_occlusion_option::strength(
         loaded_graphics_config.get_option_value(ambient_occlusion_option::id));
     sky_fog_option::apply(loaded_graphics_config.get_option_value(sky_fog_option::id));
+    scenery_fill_option::apply(loaded_graphics_config.get_option_value(scenery_fill_option::id));
     // Car Lighting is disabled for now (add_car_lighting_option): the cars keep Original lighting whatever is saved.
     rush2::probes::set_mode(rush2::probes::Mode::Original);
     car_sheen_option::apply(loaded_graphics_config, loaded_graphics_config.get_option_value(car_sheen_option::id));
@@ -1236,6 +1299,8 @@ void rush2::init_config() {
         recompui::config::get_general_config().get_option_value(look_back_option::id)));
     rush2::npc_cars::set_catch_up(std::get<bool>(
         recompui::config::get_general_config().get_option_value(catch_up_option::id)));
+    rush2::npc_cars::set_unlocked_opponents(std::get<bool>(
+        recompui::config::get_general_config().get_option_value(unlocked_opponents_option::id)));
     rush2::game_filter::apply(std::get<bool>(
         recompui::config::get_general_config().get_option_value(rush2::game_filter::option_id())));
     rush2::touch::apply(static_cast<rush2::touch::Mode>(std::get<uint32_t>(

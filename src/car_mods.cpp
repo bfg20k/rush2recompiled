@@ -48,6 +48,7 @@
 #include "asset_catalog.h"
 #include "assets.h"
 #include "arcade2049.h"
+#include "sfrush_ps1.h"
 #include "car2049.h"
 #include "car_mods.h"
 #include "data_files.h"
@@ -1563,6 +1564,9 @@ namespace {
     std::string applied_new_key[new_car_slots]; // mod id, car id and the hash of its files
     // A hash of each slot's key (0 empty), for online races (rush2::car_mods::online_car_checks; any thread).
     std::atomic<uint32_t> online_checks[new_car_slots] = {};
+    // Each slot's mod id and car id ("" empty), for rush2::car_mods::new_car_type (any thread).
+    std::mutex slot_ids_mutex;
+    std::pair<std::string, std::string> slot_ids[new_car_slots];
     uint32_t online_check(const std::string& key) {
         if (key.empty()) return 0;
         uint32_t h = 2166136261u;
@@ -2018,7 +2022,8 @@ namespace {
     // A new car's .json. schemes: its glbs (file names in rush2/new_cars/), the "schemes" list, empty without one.
     // hoods: the "hoods" list (the hood camera's hood per scheme, or of the car), empty without one.
     bool read_new_car(const std::vector<uint8_t>& text, rush2::car2049::ModCar& spec, std::vector<std::string>& schemes,
-                      std::vector<std::string>& hoods, std::vector<std::string>& brakes, std::string& error) {
+                      std::vector<std::string>& hoods, std::vector<std::string>& brakes, std::string& logo_file,
+                      std::string& error) {
         nlohmann::json j = nlohmann::json::parse(text.begin(), text.end(), nullptr, false);
         if (!j.is_object()) {
             error = "the .json isn't a JSON object";
@@ -2076,6 +2081,45 @@ namespace {
             return false;
         }
         for (float& s : spec.wheel_scale) s = std::clamp(s, 0.0f, 3.0f);
+        if (j.contains("no_wheels")) {
+            if (!j["no_wheels"].is_boolean()) {
+                error = "\"no_wheels\" is true or false";
+                return false;
+            }
+            spec.wheels_hidden = j["no_wheels"].get<bool>();
+        }
+        if (j.contains("no_wings")) {
+            if (!j["no_wings"].is_boolean()) {
+                error = "\"no_wings\" is true or false";
+                return false;
+            }
+            spec.wings_hidden = j["no_wings"].get<bool>();
+        }
+        for (const auto& [key, flag] : { std::pair<const char*, bool*>{ "no_skid_marks", &spec.marks_hidden },
+                                         std::pair<const char*, bool*>{ "no_wheel_dust", &spec.dust_hidden } }) {
+            if (!j.contains(key)) continue;
+            if (!j[key].is_boolean()) {
+                error = std::string("\"") + key + "\" is true or false";
+                return false;
+            }
+            *flag = j[key].get<bool>();
+        }
+        if (j.contains("round_shadow")) {
+            if (!j["round_shadow"].is_number() || j["round_shadow"].get<double>() < 0.0) {
+                error = "\"round_shadow\" is a radius in feet";
+                return false;
+            }
+            spec.shadow_radius = std::min(j["round_shadow"].get<float>(), 20.0f);
+        }
+        // The car select's name logo: a 128 x 32 image in rush2/new_cars/ (read by load_new_cars into spec.logo).
+        logo_file.clear();
+        if (j.contains("logo")) {
+            logo_file = j["logo"].is_string() ? j["logo"].get<std::string>() : std::string();
+            if (logo_file.empty() || logo_file.find_first_of("/\\") != std::string::npos) {
+                error = "\"logo\" is an image file name in rush2/new_cars/";
+                return false;
+            }
+        }
         if (j.contains("box")) {
             if (!vec(j["box"], spec.box, 4)) {
                 error = "\"box\" needs [front, rear, half width, height] in feet";
@@ -2266,12 +2310,16 @@ namespace {
             std::vector<uint8_t> text;
             std::vector<std::vector<uint8_t>> glbs, hood_glbs, brake_glbs;
             std::vector<std::string> scheme_files, hood_files, brake_files;
+            std::string logo_file;
             rush2::car2049::ModCar spec;
             std::string error;
             if (!read_mod_file(mods[f.mod], base + ".json", text)) {
                 error = "can't read " + f.id + ".json";
             }
-            else if (read_new_car(text, spec, scheme_files, hood_files, brake_files, error)) {
+            else if (read_new_car(text, spec, scheme_files, hood_files, brake_files, logo_file, error)) {
+                if (!logo_file.empty() && !read_mod_file(mods[f.mod], "rush2/new_cars/" + logo_file, spec.logo)) {
+                    error = "can't read " + logo_file;
+                }
                 if (scheme_files.empty()) scheme_files.push_back(f.id + ".glb");
                 for (const std::string& file : scheme_files) {
                     glbs.emplace_back();
@@ -2309,6 +2357,7 @@ namespace {
             for (const auto& g : glbs) c.hash = rush2::track_cache::hash(g.data(), g.size(), c.hash);
             for (const auto& g : hood_glbs) c.hash = rush2::track_cache::hash(g.data(), g.size(), c.hash ^ 0x400Dull);
             for (const auto& g : brake_glbs) c.hash = rush2::track_cache::hash(g.data(), g.size(), c.hash ^ 0xB4A6Eull);
+            c.hash = rush2::track_cache::hash(spec.logo.data(), spec.logo.size(), c.hash ^ 0x1060ull);
             c.key = c.mod_id + "/" + f.id + "/" + std::to_string(c.hash);
             if (!convert("NC" + std::to_string(n + 1), "newcar_" + std::to_string(n + 1), uint32_t(64 + n), glbs, c.model,
                          c.car, c.stand_ins, error, true, hood_glbs, brake_glbs)) {
@@ -2476,13 +2525,19 @@ namespace {
                 if (s.scuffed != s.texels) scuffed[s.offset] = s.scuffed; // unpainted: nothing to scuff
             }
             size_t car_bytes = c.car.size();
-            rush2::car2049::set_mod_car_from_2049(n, c.mod_id == rush2::arcade2049::car_mod_id);
+            rush2::car2049::set_mod_car_game(n, c.mod_id == rush2::arcade2049::car_mod_id ? rush2::car2049::ModGame::Rush2049
+                                                : c.mod_id == rush2::sfrush_ps1::mod_id    ? rush2::car2049::ModGame::SFRush
+                                                                                           : rush2::car2049::ModGame::Custom);
             rush2::car2049::set_mod_car(rdram, n, std::move(c.car), "NC" + std::to_string(n + 1), scuffed, c.spec);
             printf("[newcar] %s (%s) from %s as type %d: %zu triangles, %zu textures, %d scheme(s), %zu KB, based on %s\n",
                    c.spec.name.c_str(), c.id.c_str(), c.mod_id.c_str(), rush2::car_types::first_mod + n,
                    triangles, c.stand_ins.size(), c.spec.schemes, car_bytes / 1024, prefixes[c.spec.base]);
             applied_new_key[n] = c.key;
             online_checks[n] = online_check(c.key);
+            {
+                std::lock_guard lock{ slot_ids_mutex };
+                slot_ids[n] = { c.mod_id, c.id };
+            }
             applied_new[n].mod_id = c.mod_id;
             applied_new[n].glb_hash = c.hash;
             applied_new[n].stand_ins = std::move(c.stand_ins);
@@ -2495,6 +2550,10 @@ namespace {
             printf("[newcar] mod car slot %d emptied\n", n + 1);
             applied_new_key[n].clear();
             online_checks[n] = 0;
+            {
+                std::lock_guard lock{ slot_ids_mutex };
+                slot_ids[n] = {};
+            }
             applied_new[n] = Applied{};
             changed = true;
         }
@@ -2623,6 +2682,14 @@ void rush2::car_mods::check(uint8_t* rdram) {
 
 void rush2::car_mods::reload() {
     reload_requested = true;
+}
+
+int rush2::car_mods::new_car_type(const std::string& mod_id, const std::string& car_id) {
+    std::lock_guard lock{ slot_ids_mutex };
+    for (int n = 0; n < new_car_slots; n++) {
+        if (slot_ids[n].first == mod_id && slot_ids[n].second == car_id) return rush2::car_types::first_mod + n;
+    }
+    return -1;
 }
 
 std::array<uint32_t, rush2::car_types::count_mod> rush2::car_mods::online_car_checks() {

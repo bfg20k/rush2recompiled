@@ -18,6 +18,10 @@ namespace rush2::ui {
     class OptionsPage;
 }
 
+namespace rush2::track_mod {
+    struct Extras;
+}
+
 // The arcade games' content (src/arcade2049/, docs/arcade2049.md, docs/sfrush_arcade.md), built from the arcade data
 // ProjectR unpacks from an arcade hard drive into mods (src/arcade2049/arcade_track.cpp, arcade_cars.cpp). The Games
 // tab builds and installs them; a new build or new arcade data rebuilds them once at the next launch.
@@ -110,6 +114,9 @@ namespace rush2::arcade2049 {
     void refresh_now();
     // A mod has been built this session (by refresh_now or the Games tab): the launch's progress screen shows.
     bool rebuilt();
+    // The game's arcade data folder in use (the one picked this session, else the installed mods', else ProjectR's),
+    // or empty when there is none: the music plays from it (src/music_streams.cpp). Any thread.
+    std::filesystem::path current_data_dir(const ArcadeGame& game);
 
     // The Games tab's options under Rush 2049 Arcade: Arcade Checkpoints.
     void init_config();
@@ -122,6 +129,11 @@ namespace rush2::arcade2049 {
     void load_checkpoints_config();
     void add_checkpoints_option(rush2::ui::OptionsPage* page);
     void checkpoints_changed();                 // the arcade tracks mod was installed again: read the banner again
+
+    // The coins or keys of the course an arcade version of it has (src/arcade2049/arcade_collectibles.cpp,
+    // docs/arcade2049.md#coins-and-keys-on-the-arcade-versions), added to `out` for the custom track converter: their
+    // models from the N64 game and their records. False when the track has none or that game's ROM isn't there.
+    bool collectible_extras(const std::string& mod_id, const std::string& folder, rush2::track_mod::Extras& out);
     // checkpoints_frame (every game frame) is in include/arcade_checkpoints.h, which needs the game's headers.
 }
 

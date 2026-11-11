@@ -4268,7 +4268,7 @@ ref = "docs/online.md#players-per-machine"
 vram = 0x80059D24
 name = "car_model_update_parts"
 sig = "void car_model_update_parts(Node *a0, void *a1)"
-desc = "Patched in us.toml. Per-type 16-byte tables (car boxes 0x800CAC6C [22], 0x800CADCC [23, entry 22 special]) moved to 73-entry copies for the Rush 2049, California Speed and mod cars (src/rush2049/car2049.cpp). | Picks the special entry 22 of the per-type 16-byte table at 0x800CADCC. | Also the car's shadow polygon (car state +0x20C, func_80053D28 with 4 corners): corner w = the car record's wheel point (0x801124A0 + car * 0x354, +0x6C + 12w) with y - h + lift, h = max(0, wheel height above the ground, physics car +0x784 + 4w, a copy of +0x5DC made by func_80069004), lift = 2 if h > 10 else h * f32(0x800CF468) + 1; the front pair (w < 2) of the viewed car is nudged by the double at 0x800CF470. In contact the shadow rides 1 ft over the wheel points."
+desc = "Patched in us.toml. Per-type 16-byte tables (car boxes 0x800CAC6C [22], 0x800CADCC [23, entry 22 special]) moved to 73-entry copies for the Rush 2049, California Speed and mod cars (src/rush2049/car2049.cpp). | Picks the special entry 22 of the per-type 16-byte table at 0x800CADCC. | Also the car's shadow polygon (car state +0x20C, func_80053D28 with 4 corners): corner w = the car record's wheel point (0x801124A0 + car * 0x354, +0x6C + 12w) with y - h + lift, h = max(0, wheel height above the ground, physics car +0x784 + 4w, a copy of +0x5DC made by func_80069004), lift = 2 if h > 10 else h * f32(0x800CF468) + 1; the front pair (w < 2) of the viewed car is nudged by the double at 0x800CF470. In contact the shadow rides 1 ft over the wheel points. Hooked at 0x8005A270 (its end): a mod car with \"round_shadow\" gets its shadow redrawn as a disc (src/mod_car_shadow.cpp, docs/sfrush_ps1.md)."
 consts = "0x16 = 22 = special/no-car entry; 0x354 = car record stride; 10 = shadow height cutoff; 1.0, 2.0 = shadow lift"
 status = "inferred"
 ported = true
@@ -5164,7 +5164,7 @@ ref = "docs/functions/rush2_other.md#rush-2-other-functions"
 vram = 0x80060E34
 name = "hud_stunt_box_visible"
 sig = "s32 hud_stunt_box_visible(HudElement *e)"
-desc = "Visibility callback of the stunt panel's boxes (func_80093B38 elements): hides the box unless the panel shows (track 11 or the 0x8010C200 cheat byte), the player (param >> 4) is under the player count, and for the trick name's box (param & 0xF == 1) while the player's 0x8010C070 flag is clear. The Rush 2049 Stunt HUD hooks its first test (0x80060E98) to hide the boxes and keep whether they would show (src/rush2049/stunt2049.cpp)."
+desc = "Visibility callback of the stunt panel's boxes (func_80093B38 elements): hides the box unless the panel shows (track 11 or the 0x8010C200 cheat byte), the player (param >> 4) is under the player count, and for the trick name's box (param & 0xF == 1) while the player's 0x8010C070 flag is clear. The Rush 2049 Stunt HUD hooks its first test (0x80060E98) to hide the boxes and keep whether they would show (src/rush2049/stunt2049.cpp). / A custom track's [track] stunts reads the cheat byte as set: rush2_track_mod_stunts hooked at 0x80060E7C, after its load into $a1 (src/rush2049/track2049.cpp, docs/sfrush_ps1.md#stunt-track)."
 consts = "e+0x2C = (player << 4) | box (0 BEST/TOTAL scores, 1 trick name); 0xB = STUNT1 track id"
 status = "verified"
 area = "ui"
@@ -6096,10 +6096,11 @@ ref = "docs/rush2049_research/car_physics.md#9-accurate-car-stats-and-torque-reb
 vram = 0x80069A54
 name = "car_linear_accel_stage"
 sig = "void car_linear_accel_stage(Car *car)"
-desc = "Linear accelerations stage of the physics step."
+desc = "Linear accelerations stage of the physics step: +0x1C, +0x20, +0x24 = the car-frame force sum +0x4, +0x8, +0xC (gravity rotated in by car_force_sum) x 0x80110018 / the weight +0x5AC ($f0 holds the quotient), then car_angular_accel; +0x24 is stored in the jal's delay slot. Hooked at 0x80069A9C by rush2_track_traction (src/track_traction.cpp: a custom track's [handling] traction scales the sum's world-horizontal parts, gravity and slopes included, keeping the vertical)."
+consts = "0x80110018 = car_linear_accel_scale (32.2 x the gravity setting); 0x5AC = weight"
 status = "verified"
 area = "car"
-ref = "docs/rush2049_research/car_physics.md#9-accurate-car-stats-and-torque-rebalance-implemented-october-2026"
+ref = "docs/sfrush_ps1.md#snow-and-night"
 
 [[func]]
 vram = 0x80069AB4
@@ -6187,6 +6188,7 @@ desc = "Patched in us.toml. Rush 2049 wings physics (src/rush2049/wings_state.cp
 consts = "-10, -15, -0.7 = dirt/grass/pavement rear wheel coefficients; 0.0135 = aero drag coefficient"
 status = "verified"
 ported = true
+rush1 = [0x80077C90]
 rush2049 = [0x800E23A4]
 calspeed = [0x8008F268]
 area = "car"
@@ -7024,7 +7026,7 @@ ref = "docs/functions/rush2_race.md#rush-2-race-functions"
 vram = 0x80074990
 name = "drone_driver"
 sig = "void drone_driver(Car *car)"
-desc = "Patched in us.toml. Ghost races (src/ghost.cpp): race settings (a computer car per chosen ghost), race setup, the ghosts' cars and colors, each car's physics tick (recording player 1, skipping the ghosts' scheduled steps), the drones' driver (skipped for ghosts), the end of a physics tick (the ghosts' steps), car against car (not ghosts), standings, track map and radar dots (not ghosts), the view's fog color (the ghosts' translucency), and the end of the car select's text (the ghost choice). | Drone AI driver: aims for the lane's target speed (u8 mph at lane point +6, x1.4667 ft/s) x 1.05 x rubber band (+0x808), at least 75/90/135/180 ft/s (0x800C3FFC[0x800E7D22]), working throttle and brake. | Computer car lane follower. Converts a lane's mph to ft/s with x 1.4667 and aims for the lane speed x 1.05 x rubber band (+0x808). Hooked at start ($a0 = car) so ghost cars are driven by their recorded samples. | Puts a drone back on the road (car +0x810 = 1, acted on by race_stuck_wrongway_update_8008CDA4) at 0x80075238 when it is more than 100 ft from its lane point along the lane or across it (drone_steer_along_path_80074284 state +0 / +4), or at 0x800751FC when state +0x24 >= 11 over 1 s after state +0x20."
+desc = "Patched in us.toml. Ghost races (src/ghost.cpp): race settings (a computer car per chosen ghost), race setup, the ghosts' cars and colors, each car's physics tick (recording player 1, skipping the ghosts' scheduled steps), the drones' driver (skipped for ghosts), the end of a physics tick (the ghosts' steps), car against car (not ghosts), standings, track map and radar dots (not ghosts), the view's fog color (the ghosts' translucency), and the end of the car select's text (the ghost choice). | Drone AI driver: aims for the lane's target speed (u8 mph at lane point +6, x1.4667 ft/s) x 1.05 x rubber band (+0x808), at least 75/90/135/180 ft/s (0x800C3FFC[0x800E7D22]), working throttle and brake. | Computer car lane follower. Converts a lane's mph to ft/s with x 1.4667 and aims for the lane speed x 1.05 x rubber band (+0x808). Hooked at start ($a0 = car) so ghost cars are driven by their recorded samples. | Puts a drone back on the road (car +0x810 = 1, acted on by race_stuck_wrongway_update_8008CDA4) at 0x80075238 when it is more than 100 ft from its lane point along the lane or across it (drone_steer_along_path_80074284 state +0 / +4), or at 0x800751FC when state +0x24 >= 11 over 1 s after state +0x20. | Lane walk 0x80074CD4-0x80074D80: from lane state +0 + 80 - +0xC, steps path_next_node_8006DB00 taking off each segment's length until <= 0; never ends for a car flung ~1e11 ft out (float subtraction no-op), the freeze of GitHub issue 60 (docs/npc_cars.md#circuit-skill)."
 consts = "1.46667 = mph to ft/s; 100 = ft from the lane point before a reset"
 status = "verified"
 ported = true
@@ -7470,7 +7472,7 @@ ref = "docs/rush2049_research/geometry.md#52-pvs-which-sections-are-drawn"
 vram = 0x8007C27C
 name = "pvs_apply"
 sig = "void pvs_apply(void *a0, s32 a1, void *a2)"
-desc = "Patched in us.toml. Rush 2049 tracks (src/rush2049/track2049.cpp): func_800A4C98 queues the race's track files, func_8007C27C picks the visible sections for the camera's region, func_800A45A8 builds the sky. / SF Rush visibility (src/rush1/track1.cpp): the camera position, for SF Rush's own region choice in rush2_track49_pvs. | Per-view PVS: finds the camera's region (func_8007C06C), looks up a 128-bit mask in the per-track table (jump table 0x800CF9A4), and sets/clears node flag 0x400 for the first N = u8[0x800CA1A8+track] nodes from 0x8010C164. | Picks the section visibility mask (16 bytes, hide flag 0x400) for a view from its camera region, via a per-track table (jump table 0x800CF9A4). $a1 = camera position. Hooked at its start to record the camera and at 0x8007C480 (0x5C($sp) = chosen mask, 0x78($sp) = region, -1 none) to use Rush 1's region choice and 2049's masks. Rush 1's equivalent is func_80064544. / Draw Distance (src/draw_distance.cpp): widened to every section except distant stand-ins (sections their own region hides), which keep the region's choice."
+desc = "Patched in us.toml. Rush 2049 tracks (src/rush2049/track2049.cpp): func_800A4C98 queues the race's track files, func_8007C27C picks the visible sections for the camera's region, func_800A45A8 builds the sky. / SF Rush visibility (src/rush1/track1.cpp): the camera position, for SF Rush's own region choice in rush2_track49_pvs. | Per-view PVS: finds the camera's region (func_8007C06C), looks up a 128-bit mask in the per-track table (jump table 0x800CF9A4), and sets/clears node flag 0x400 for the first N = u8[0x800CA1A8+track] nodes from 0x8010C164. | Picks the section visibility mask (16 bytes, hide flag 0x400) for a view from its camera region, via a per-track table (jump table 0x800CF9A4). $a1 = camera position. Hooked at its start to record the camera and at 0x8007C480 (0x5C($sp) = chosen mask, 0x78($sp) = region, -1 none) to use Rush 1's region choice and 2049's masks. Rush 1's equivalent is func_80064544. / Draw Distance (src/draw_distance.cpp): widened to every section except distant stand-ins (sections their own region hides), which keep the region's choice, and the three Lower Manhattan copies (NYONEFAKE_TT, NYONEBB_LOD1/2), never drawn (issue #61)."
 consts = "0.0174533 = deg to rad"
 status = "verified"
 ported = true
@@ -8139,6 +8141,7 @@ sig = "s32 particle_emitter_spawn(s16 car, s16 emitter, s32 a2)"
 desc = "Patched in us.toml. Throws an emitter's particles: emitters 0-3 a wheel, 4 and 5 the car's own. A wheel under speed / 4 10 throws nothing (0x8008279C); material 1 throws DUST (0x800828EC, emitter 0x8010D26C), 2 SPLASH (0x8008292C, 0x8010D28C), anything else SMOKE / SMOKE_FAST by speed. Hooked at 0x8008277C for converted tracks' rules (src/surface_fx.cpp). Car preview ids (car select: id = player * 73 + type, was * 22) index the race per-car arrays, which move to 146-entry copies in two windows, 0x80208000- and 0x8022A000- (include/car_types.h, tools/rush2049/cartypes.py id_toml; strides unchanged), with the id arithmetic re-based from 22 to 73."
 status = "verified"
 ported = true
+rush2049 = [0x8008EA10]
 calspeed = [0x800BCF9C]
 area = "render"
 ref = "docs/calspeed_research.md#wheel-effects"
@@ -8573,13 +8576,13 @@ ref = "docs/rush2049_research/cars.md#hood-camera-v"
 [[func]]
 vram = 0x800878C8
 name = "car_preview_copy_matrices"
-sig = "void car_preview_copy_matrices(Node *a0)"
-desc = "Patched in us.toml. Rush 2's per-car-type tables (0x800C06B4-0x800C0FDE, 22 entries, 1 or 3 rows) moved to 73-entry copies at 0x80200000 for the Rush 2049 cars (types 23-35), California Speed's (36-56) and mod cars (57-72; 22 stays Rush 2's \"no car\" marker; include/car_types.h), built at boot by src/rush2049/car2049.cpp. Generated by tools/rush2049/cartypes.py toml: table address relocations, row-stride idioms (r * 22 -> r * 73) and row offsets. / Car preview ids (car select: id = player * 73 + type, was * 22) index the race per-car arrays, which move to 146-entry copies in two windows, 0x80208000- and 0x8022A000- (include/car_types.h; strides unchanged), with the id arithmetic re-based from 22 to 73. | Maps a car preview id to its type."
-consts = "0x16 = car types; 0x38 = node size"
+sig = "void car_preview_copy_matrices(s16 preview_id)"
+desc = "Patched in us.toml. Rush 2's per-car-type tables (0x800C06B4-0x800C0FDE, 22 entries, 1 or 3 rows) moved to 73-entry copies at 0x80200000 for the Rush 2049 cars (types 23-35), California Speed's (36-56) and mod cars (57-72; 22 stays Rush 2's \"no car\" marker; include/car_types.h), built at boot by src/rush2049/car2049.cpp. Generated by tools/rush2049/cartypes.py toml: table address relocations, row-stride idioms (r * 22 -> r * 73) and row offsets. / Car preview ids (car select: id = player * 73 + type, was * 22) index the race per-car arrays, which move to 146-entry copies in two windows, 0x80208000- and 0x8022A000- (include/car_types.h; strides unchanged), with the id arithmetic re-based from 22 to 73. | The car select's wheel placer: type = preview id % 73 (x 4 in $s2), each wheel's node (0x38-byte records) put at the type's wheel position and scaled by the player's front / rear TIRE SIZE row (0x80201E1C / 0x802013D4 [panel row + type], loaded at 0x800879F4 / 0x80087A34; 1.0 copies the matrix). The race's placer is carselect_preview_update_8005A598. Hooked after both loads: rush2_mod_car_wheel_scale draws a no_wheels mod car's at 0 (docs/sfrush_ps1.md)."
+consts = "0x49 = car types (73); 0x38 = wheel node size; 0xC = wheel position stride"
 status = "inferred"
 ported = true
 area = "car"
-ref = "us.toml"
+ref = "docs/sfrush_ps1.md#what-the-converter-makes"
 
 [[func]]
 vram = 0x80087A8C
@@ -9427,7 +9430,7 @@ ref = "docs/rush2049_research/geometry.md#24-texture-record-0x20-and-palette-rec
 vram = 0x8008F220
 name = "checkpoint_passed"
 sig = "void checkpoint_passed(Car *car)"
-desc = "Checkpoint passed: next/loop/arming, lap counting; for the human adds bonus(cp) x f to time allowed 0x8010C204 (bonus +0x1E lap 1, else +0x20). | Checkpoint/lap crossing: counts a car's laps (+0x7FD) at the finish line and passes checkpoints. Rush 1's func_8009D818 is its twin."
+desc = "Checkpoint passed: next/loop/arming, lap counting; for the human adds bonus(cp) x f to time allowed 0x8010C204 (bonus +0x1E lap 1, else +0x20). | Checkpoint/lap crossing: counts a car's laps (+0x7FD) at the finish line and passes checkpoints. Rush 1's func_8009D818 is its twin. | Time Sprint (src/time_sprint.cpp, docs/sfrush_ps1.md#time-sprint): hook at 0x8008F664 skips the time bonus and BONUS TIME banner while CHECKPOINTS is CLOCKS on a track with clocks, and the hook at 0x8008F418 the checkpoint sounds (0x8008F480-0x8008F4AC: chime 0x4B, then $a3 = 0x60 at a checkpoint or a finish place call 0x33-0x38; skipped while $a3 is 0x60)."
 consts = "0.075 = time bonus factor"
 status = "verified"
 rush1 = [0x8009D818]
@@ -9905,7 +9908,7 @@ ref = "docs/functions/rush2_ui.md#rush-2-ui-functions"
 vram = 0x80094698
 name = "menu_settings_to_race_globals"
 sig = "void menu_settings_to_race_globals(void)"
-desc = "Patched in us.toml. Rush 2049's obstacle course (src/rush2049/track2049.cpp): raced alone over one lap with checkpoints on (end of func_80094698), against a 5-minute clock (func_800AE670 just after it set the time allowed, 0x8010C204). / Rush 2049's respawn zones (type 2 branches, src/rush2049/track2049.cpp): the car is put back on the spot. / Ghost races (src/ghost.cpp): race settings (a computer car per chosen ghost), race setup, the ghosts' cars and colors, each car's physics tick (recording player 1, skipping the ghosts' scheduled steps), the drones' driver (skipped for ghosts), the end of a physics tick (the ghosts' steps)... | Copies the menu settings struct (0x800D5760) into the race globals (backward 0x80119848, mirror 0x800D0190, fog 0x800D1FA8, wind 0x8010D388, laps 0x8010C0E2, drones 0x800D3E90, difficulty 0x8010C211, handicap 0x800D5798); in circuit mode values come from circuit entry 0x800D3A60[race*4]; track 11 forces backward/mirror off, track 10 fog 1 wind 0. | Copies the race options into the race's settings (also run by menus). Sets backward/mirror off and no drones in stunt mode. Hooked at its end (0x80094A2C) and at 0x80094754 / 0x800947F0."
+desc = "Patched in us.toml. Rush 2049's obstacle course (src/rush2049/track2049.cpp): raced alone over one lap with checkpoints on (end of func_80094698), against a 5-minute clock (func_800AE670 just after it set the time allowed, 0x8010C204). / Rush 2049's respawn zones (type 2 branches, src/rush2049/track2049.cpp): the car is put back on the spot. / Ghost races (src/ghost.cpp): race settings (a computer car per chosen ghost), race setup, the ghosts' cars and colors, each car's physics tick (recording player 1, skipping the ghosts' scheduled steps), the drones' driver (skipped for ghosts), the end of a physics tick (the ghosts' steps)... | Copies the menu settings struct (0x800D5760) into the race globals (backward 0x80119848, mirror 0x800D0190, fog 0x800D1FA8, wind 0x8010D388, laps 0x8010C0E2, drones 0x800D3E90, difficulty 0x8010C211, handicap 0x800D5798); in circuit mode values come from circuit entry 0x800D3A60[race*4]; track 11 forces backward/mirror off, track 10 fog 1 wind 0. | Copies the race options into the race's settings (also run by menus). Sets backward/mirror off and no drones in stunt mode. Hooked at its end (0x80094A2C) and at 0x80094754 / 0x800947F0. | DEATHS' EXPLOSIVE: hook at 0x80094978 sets 0x8010BC98 = 2 in a circuit with EXPLOSIVE (its record, src/explosive.cpp). In a single race menu +0x11 = 2 (EXPLOSIVE) and +0x19 = 2 (CHECKPOINTS' CLOCKS, 0x8010C17B) copy through as they are; a circuit forces 0x8010C17B to 1 (docs/sfrush_ps1.md#game-modes)."
 status = "verified"
 ported = true
 area = "menu"
@@ -11423,8 +11426,8 @@ ref = "docs/functions/rush2_race.md#rush-2-race-functions"
 vram = 0x800A1A98
 name = "rubber_band"
 sig = "void rubber_band(void)"
-desc = "Rubber band: computes the drone speed multiplier stored at car +0x808. / Places from car state +0xE9 per car (sp+0x1FC), cars sorted by place (sp+0x210); the loop at 0x800A2218 skips a car whose +0x7E6 is 0, and a car neither first nor last reads its neighbors at place - 1 / + 1 (0x800A290C), so a place past the sorted cars reads stack garbage. Hooked at 0x800A2238 to skip ghost cars (src/ghost.cpp). / Drone Cheating option (src/npc_cars.cpp): targets start from DIFFICULTY 0x8010C211 and place as base values $f24 (+0x808) / $f22 (+0x814), bent by the gap to the neighbor through func_800A19B0 into $f2 / $f12, eased toward at 0x800A2F10; hooked at 0x800A2F14 to use the base values when catch-up is off."
-consts = "0x81C = car stride, 0x354 = per-car result stride"
+desc = "Rubber band: computes the drone speed multiplier stored at car +0x808. / Places from car state +0xE9 per car (sp+0x1FC), cars sorted by place (sp+0x210); the loop at 0x800A2218 skips a car whose +0x7E6 is 0, and a car neither first nor last reads its neighbors at place - 1 / + 1 (0x800A290C), so a place past the sorted cars reads stack garbage. Hooked at 0x800A2238 to skip ghost cars (src/ghost.cpp). / Drone Cheating option (src/npc_cars.cpp): targets start from DIFFICULTY 0x8010C211 and place as base values $f24 (+0x808) / $f22 (+0x814), bent by the gap to the neighbor through func_800A19B0 into $f2 / $f12, eased toward at 0x800A2F10; hooked at 0x800A2F14 to use the base values when catch-up is off. / In a circuit (race type 0x8010C3E8 == 1, 0x800A230C) f20 *= skill / 3 + 0.75 with skill = s16 0x800D3B64 + car x 0x58 + 2 x (track + 7 x backward) (the standings' skill entries); hooked at 0x800A2358 to keep courses 7-10 raced backward within the car's 14 entries (src/circuit.cpp, GitHub issue 60)."
+consts = "0x81C = car stride, 0x354 = per-car result stride; 0x58 = standings stride, 7 = backward skill entries, 3 and 0.75 = skill scale"
 status = "verified"
 ported = true
 rush2049 = [0x800F93A0]
@@ -11598,7 +11601,7 @@ ref = "docs/rush2049_research/movers.md#8-rush-2-hook-design-recommended"
 vram = 0x800A5110
 name = "race_load_track"
 sig = "s32 race_load_track(s32 a0, s32 a1)"
-desc = "Patched in us.toml. The row count follows the unlock system's UNLOCKS row (6 or 7 rows; src/rush2049/track2049_menu.cpp). / Ghost races (src/ghost.cpp): race settings (a computer car per chosen ghost), race setup, the ghosts' cars and colors, each car's physics tick (recording player 1, skipping the ghosts' scheduled steps), the drones' driver (skipped for ghosts), the end of a physics tick (the ghosts' steps), car against car (not ghosts), standings, track map and radar dots (not ghosts), the view's fog color (the ghosts' translucency), and the end of the car select's text (the ghost choice). | Race loader (track): loads logo asset 4+track at 0x800A55B8; calls func_800A4C98, func_800A45A8, func_8008BC64(track), prefix 0x800C182C[track] via func_800601C4. Called from func_800A5ADC and func_800A57C8. | Race setup, also on restart (looks up the track tree by prefix from table 0x800C182C and relocates the placement). Hooked at 0x800A5114."
+desc = "Patched in us.toml. The row count follows the unlock system's UNLOCKS row (6 or 7 rows; src/rush2049/track2049_menu.cpp). / Ghost races (src/ghost.cpp): race settings (a computer car per chosen ghost), race setup, the ghosts' cars and colors, each car's physics tick (recording player 1, skipping the ghosts' scheduled steps), the drones' driver (skipped for ghosts), the end of a physics tick (the ghosts' steps), car against car (not ghosts), standings, track map and radar dots (not ghosts), the view's fog color (the ghosts' translucency), and the end of the car select's text (the ghost choice). | Race loader (track): loads logo asset 4+track at 0x800A55B8; calls func_800A4C98, func_800A45A8, func_8008BC64(track), prefix 0x800C182C[track] via func_800601C4. Called from func_800A5ADC and func_800A57C8. | Race setup, also on restart (looks up the track tree by prefix from table 0x800C182C and relocates the placement). Hooked at 0x800A5114. Fill Scenery Gaps (src/scenery_fill.cpp, docs/graphics_effects.md#fill-scenery-gaps) hooks 0x800A5704 and 0x800A570C around its placement_walk_80081790 call: the scene nodes made between them are the track's models."
 consts = "0x12-0x16 = asset indices (track containers)"
 status = "verified"
 ported = true
@@ -13255,7 +13258,7 @@ ref = "docs/functions/rush2_ui.md#rush-2-ui-functions"
 vram = 0x800B7654
 name = "hud_widget_text_cb_player_stats"
 sig = "s32 hud_widget_text_cb_player_stats(HudWidget *w)"
-desc = "Stunt panel text callback (HUD layout entry 111): for every player ($s6) prints the trick name and multiplier while 0x8010C070[player] is set, and BEST (0x8010C068) / TOTAL (0x8010C074) with their values; sets the text scale 0x800BEF48 to 0 so the text draws at once. Rush 2049 stunt scoring (src/rush2049/stunt2049.cpp): hooks at 0x800B7838/0x800B78C0 (the trick name's table slot points at the combo's name), 0x800B78F4 (points line), 0x800B7974 (BEST) and 0x800B79F8 (TOTAL) rewrite its text with Rush 2049's scores."
+desc = "Stunt panel text callback (HUD layout entry 111): for every player ($s6) prints the trick name and multiplier while 0x8010C070[player] is set, and BEST (0x8010C068) / TOTAL (0x8010C074) with their values; sets the text scale 0x800BEF48 to 0 so the text draws at once. Rush 2049 stunt scoring (src/rush2049/stunt2049.cpp): hooks at 0x800B7838/0x800B78C0 (the trick name's table slot points at the combo's name), 0x800B78F4 (points line), 0x800B7974 (BEST) and 0x800B79F8 (TOTAL) rewrite its text with Rush 2049's scores. / A custom track's [track] stunts reads the cheat byte (0x8010C200, loaded at 0x800B76AC) as set: rush2_track_mod_stunts hooked at 0x800B76B0 (src/rush2049/track2049.cpp, docs/sfrush_ps1.md#stunt-track)."
 consts = "0x78/0xE6 = panel y (player 1 of 2 / others); 0x4A = trick name center x; 0x102 = labels' right edge; 0x10C = values' x"
 status = "verified"
 ported = true
@@ -13377,7 +13380,7 @@ ref = "docs/hud_layout.md#catalog"
 vram = 0x800B9C44
 name = "hud_widget_cb_deaths_skull"
 sig = "s32 hud_widget_cb_deaths_skull(Widget *w)"
-desc = "HUD element callback: the DEATHS option's skull (CROSSBONES). Shown while race_deaths_8010BC98 is set and its player (the parameter) is below the player count; x 80 with the race time shown, else 12; y 10, player 2 120."
+desc = "HUD element callback: the DEATHS option's skull (CROSSBONES). Shown while race_deaths_8010BC98 is set and its player (the parameter) is below the player count; x 80 with the race time shown, else 12; y 10, player 2 120. | DEATHS' EXPLOSIVE (src/explosive.cpp, docs/sfrush_ps1.md#explosive-mode): hook at 0x800B9CA4 hides the skull for half of each quarter second while the player's bomb is armed, and clears the widget's hidden byte +0x1A on the frames it shows it (hud_widget_reset_80060104 leaves it set)."
 status = "verified"
 area = "ui"
 ref = "docs/hud_layout.md#catalog"
@@ -14122,7 +14125,7 @@ ref = "us.toml"
 vram = 0x803ABE0C
 name = "trackselect_frame"
 sig = "void trackselect_frame(void)"
-desc = "Patched in us.toml. Rush 2049 track select entries (src/rush2049/track2049_menu.cpp). The track select is func_803AB294 (init and draw) and func_803ABE0C (per frame); its tables and carousel array are repointed to 30-entry copies at 0x80300000 (Rush 2's 12 tracks, Rush 2049's 6 at 12-17, SF Rush's 7 at 18-24, Rush 2049's 4 stunt arenas at 25-28 and obstacle course at 29). / Rush 2049's respawn zones (type 2 branches, src/rush2049/track2049.cpp): the car is put back on the spot. / The row count follows the unlock system's UNLOCKS row (6 or 7 rows; src/rush2049/track2049_menu.cpp). / END 4 player relocations The unlock system's shop (src/... | Track select per-frame handler (overlay): reads buttons (0x80125A68/0x8011962A), calls func_803AB294(1) to draw dioramas, on B calls func_803AB294(0) to tear down; left/right dispatch through jump table 0x803CAC10 editing the menu settings struct 0x800D5760; TRACK case cycles carouselIndex and track; saves track nibble into player record +0x30. Called from func_800AE670. | Track select per-frame step; reads the track id byte, TRACK option wraps. Hooked at start and at 0x803AC118 (TRACK step passed id 254: left wraps to 254, as lbu reads leave 0 - 1 = 255), 0x803AC670/0x803AC6B8, 0x803ABFBC, 0x803AC554. / Moving down 0x803AC4C8: top row steps unless top + 4 == count; DRONES case 0x803AC2CC wraps menu settings +0x1 with & 7. Hooked at 0x803AC4FC (short lists never scroll), 0x803AC2F0 / 0x803AC300 (ghost race DRONES). / Circuit greying: input test 0x803ABF28-0x803ABF74 and greyed flag 0x803D0608 at 0x803AC554-0x803AC640 (a circuit leaves only DEATHS, on its first race). More Circuit Settings (src/circuit.cpp) hooks 0x803ABF3C, 0x803AC064, 0x803AC410, 0x803AC558."
+desc = "Patched in us.toml. Rush 2049 track select entries (src/rush2049/track2049_menu.cpp). The track select is func_803AB294 (init and draw) and func_803ABE0C (per frame); its tables and carousel array are repointed to 30-entry copies at 0x80300000 (Rush 2's 12 tracks, Rush 2049's 6 at 12-17, SF Rush's 7 at 18-24, Rush 2049's 4 stunt arenas at 25-28 and obstacle course at 29). / Rush 2049's respawn zones (type 2 branches, src/rush2049/track2049.cpp): the car is put back on the spot. / The row count follows the unlock system's UNLOCKS row (6 or 7 rows; src/rush2049/track2049_menu.cpp). / END 4 player relocations The unlock system's shop (src/... | Track select per-frame handler (overlay): reads buttons (0x80125A68/0x8011962A), calls func_803AB294(1) to draw dioramas, on B calls func_803AB294(0) to tear down; left/right dispatch through jump table 0x803CAC10 editing the menu settings struct 0x800D5760; TRACK case cycles carouselIndex and track; saves track nibble into player record +0x30. Called from func_800AE670. | Track select per-frame step; reads the track id byte, TRACK option wraps. Hooked at start and at 0x803AC118 (TRACK step passed id 254: left wraps to 254, as lbu reads leave 0 - 1 = 255), 0x803AC670/0x803AC6B8, 0x803ABFBC, 0x803AC554. / Moving down 0x803AC4C8: top row steps unless top + 4 == count; DRONES case 0x803AC2CC wraps menu settings +0x1 with & 7. Hooked at 0x803AC4FC (short lists never scroll), 0x803AC2F0 / 0x803AC300 (ghost race DRONES). / Circuit greying: input test 0x803ABF28-0x803ABF74 and greyed flag 0x803D0608 at 0x803AC554-0x803AC640 (a circuit leaves only DEATHS, on its first race). More Circuit Settings (src/circuit.cpp) hooks 0x803ABF3C, 0x803AC064, 0x803AC410, 0x803AC558. | DEATHS (case 10, 0x803AC3D0: +0x11 xor 1, circuit_set_deaths in a circuit) and CHECKPOINTS (case 9, 0x803AC3A4: +0x19 xor 1, default 1) step three values from the hook at 0x803AC078 (rush2_track49_deaths_step, rush2_track49_clocks_step; docs/sfrush_ps1.md#game-modes)."
 status = "verified"
 ported = true
 area = "menu"
@@ -15844,7 +15847,7 @@ ref = "docs/functions/rush2_menu.md#rush-2-menu-functions"
 vram = 0x803C6268
 name = "options_text_cb_names_values"
 sig = "s32 options_text_cb_names_values(HudWidget *w)"
-desc = "Patched in us.toml. Rush 2049's respawn zones (type 2 branches, src/rush2049/track2049.cpp): the car is put back on the spot. / The obstacle course keeps DEATHS open (its value isn't grayed like STUNT1's). | Draws option names/values text (labels 0x800C48F8 + lang*11, values 0x800C4A90); tests track 5/10/11. | Options list screen; DEATHS value at 0x803C6858 / 0x803C68AC, graying options at 0x803C6354 ($s5 = 11). / Draws 4 rows (y 0xBC, 0xB apart, to 0xE8) from the top row, wrapping to 0 at the count; DRONES (case 5, 0x803C66F0) prints digits 0-7, the race drones 0x800D3E90 in style 0xA. Hooked at 0x803C6934 (short lists stop), 0x803C6714 / 0x803C6738 (ghost race DRONES, src/ghost.cpp)."
+desc = "Patched in us.toml. Rush 2049's respawn zones (type 2 branches, src/rush2049/track2049.cpp): the car is put back on the spot. / The obstacle course keeps DEATHS open (its value isn't grayed like STUNT1's). | Draws option names/values text (labels 0x800C48F8 + lang*11, values 0x800C4A90); tests track 5/10/11. | Options list screen; DEATHS value at 0x803C6858 / 0x803C68AC, graying options at 0x803C6354 ($s5 = 11). / Draws 4 rows (y 0xBC, 0xB apart, to 0xE8) from the top row, wrapping to 0 at the count; DRONES (case 5, 0x803C66F0) prints digits 0-7, the race drones 0x800D3E90 in style 0xA. Hooked at 0x803C6934 (short lists stop), 0x803C6714 / 0x803C6738 (ghost race DRONES, src/ghost.cpp). | DEATHS' value (case 10 at 0x803C6840, from 0x8010BC98: OFF at x 0x100, ON centered on 0x124) and CHECKPOINTS' (0x803C6770, from 0x8010C17B) draw EXPLOSIVE / CLOCKS from hooks there (docs/sfrush_ps1.md#game-modes)."
 status = "verified"
 ported = true
 area = "menu"

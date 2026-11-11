@@ -13,7 +13,8 @@ data folder has no saved players). Otherwise TRACK is a track select id (0-11 Ru
 30-37 battle arenas, 38-63 and 80-248 custom tracks, 64-79 California Speed, 249-254 the Rush 2049 race
 tracks' Dreamcast versions) or a custom track's folder name. --cars gives one
 car type per player (1-4 players; Rush 2 0-21, 2049 23-35, California Speed 36-56, mod cars 57-72). --script is the
---input-script (default: gas held from 1 s), counted from launch: the race is up about 5 s in.
+--input-script (default: gas held from 1 s), counted from launch: the race is up about 5 s in. A time written
+T<seconds> counts from the title screen instead (menu scripts: the launch's length varies).
 
 The game runs as a sim run (RUSH2_SIM=1, src/sim_run.cpp): hidden, deaf to real controllers, no audio, from a data
 folder of its own (tmp/test_race/data), so the player's settings and saves are never read or written. Before each run
@@ -204,11 +205,14 @@ def main():
     ap.add_argument('--config', action='append', default=[],
                     help='option of another settings file for the run, NAME.K=V (e.g. cheats.unlock_all_parts=true)')
     ap.add_argument('--shots', help='screenshot the game window at these seconds after launch (comma separated) into '
-                    'DIR/shot_<seconds>.png; the window is shown for it (RUSH2_SIM_SHOW), without taking the focus')
+                    'DIR/shot_<seconds>.png, or T<seconds> after the title screen first came up (as the --script T times); the '
+                    'window is shown for it (RUSH2_SIM_SHOW), without taking the focus')
     ap.add_argument('--records', help="a custom track's placement.bin: report which of its records moved during the race "
                     "(race_watch.py --records; moving objects)")
     ap.add_argument('--peek', action='append', default=[], help='an RDRAM u32 (hex) to print the smallest and largest of '
                     'during the race (race_watch.py --peek, repeatable; e.g. heap pointers 8010C438 8010C454)')
+    ap.add_argument('--motion', type=int, help="log this car's position and velocity every physics step and print "
+                    'its vertical kicks (race_watch.py --motion; road bumps)')
     ap.add_argument('--peek-changes', action='store_true', help='with --peek: print each change, timed from launch, '
                     'in every game state (race_watch.py --peek-changes)')
     ap.add_argument('--user-settings', action='store_true', help="copy build/'s graphics, general, cheats, circuit "
@@ -256,11 +260,12 @@ def main():
                         str(a.seconds), '--out', a.out] + (['--shots', a.shots] if a.shots else []) +
                        (['--records', os.path.abspath(a.records)] if a.records else []) +
                        [v for p in a.peek for v in ('--peek', p)] + (['--peek-changes'] if a.peek_changes else []) +
+                       (['--motion', str(a.motion)] if a.motion is not None else []) +
                        (['--exe', a.exe] if a.exe else []), env=env, capture_output=True, text=True,
                        timeout=a.seconds + 60)
     with open(os.path.join(a.out, 'watch.txt'), 'w') as f:
         f.write(r.stdout + r.stderr)
-    if a.records or a.peek:
+    if a.records or a.peek or a.motion is not None:
         print(r.stdout.rstrip())
     log = os.path.join(a.out, 'run.log')
     if os.path.exists(log):

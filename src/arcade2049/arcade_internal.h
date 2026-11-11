@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -156,6 +157,10 @@ namespace rush2::arcade2049 {
     // PNG bytes of w x h RGBA.
     std::vector<uint8_t> png(const std::vector<uint8_t>& rgba, int w, int h);
 
+    // Per corner of a triangle list (3 corners a triangle): the face normals of the triangles sharing the corner's point
+    // (to 1/1000) within `crease` degrees of this one, averaged (arcade_cars.cpp; the PS1 cars use it too).
+    std::vector<V3> smooth_normals(const std::vector<V3>& P, double crease = 60.0);
+
     // ---------------------------------------------------------------------------------------------- glb writer
     // A minimal glTF 2.0 binary writer: meshes, materials with embedded PNGs, Empties and node animations.
     class Glb {
@@ -180,6 +185,8 @@ namespace rush2::arcade2049 {
         // wrap: glTF sampler (wrapS, wrapT). Returns the material's index.
         int material(const std::string& name, std::optional<int> image, const std::string& alpha_mode, bool double_sided,
                      std::array<int, 2> wrap);
+        // Gives a material a paint mask (extras.rush2_paint, docs/car_mods.md#new-cars): red MAIN, green ACCENT.
+        void paint_mask(int material, int image);
         int textured_mesh(const std::string& name, const std::vector<Prim>& prims, const std::optional<Trs>& trs = {});
         // A mesh with the default material and zero uvs; attrs: custom float attributes, one value per vertex.
         int mesh(const std::string& name, const std::vector<V3>& verts, const std::vector<V3>& normals,
@@ -209,4 +216,39 @@ namespace rush2::arcade2049 {
 
     // Rounds halves to even (the default floating point rounding mode).
     inline double round_even(double v) { return std::nearbyint(v); }
+
+    // The spline road's cut (arcade_track.cpp spline_road; docs/custom_tracks.md#spline-road): a flat collision
+    // polygon, a footprint triangle taking its height from segment `seg`, and a spline polygon kept whole on its own
+    // segment. All in game space.
+    struct FlatPoly {
+        uint32_t flags;
+        std::vector<V3> pts;
+        V3 normal;
+    };
+    struct FootprintTri {
+        uint32_t flags;
+        std::array<V3, 3> pts;
+        int seg;
+    };
+    struct SplinePoly {
+        uint32_t flags;
+        std::vector<V3> pts;
+        V3 normal;
+        int seg;
+    };
+    // Options for cut_spline_road (the PlayStation converter's strips of road: src/sfrush_ps1/ps1_track.cpp).
+    struct SplineCut {
+        // Per segment, the u range its stretch covers from above; empty: u -1.5..2.5 (well past the road's edges).
+        std::vector<std::array<double, 2>> u_band;
+        // The segments that may take part of a polygon, most wanted first; empty: up to 30 either side of its seg.
+        std::function<std::vector<int>(const CollisionPoly&)> candidates;
+    };
+    // Cuts the spline polygons (flags & 0x1000, floor types 0-2, seg = the segment they belong near: up to 30 segments
+    // either side can take part of one) into per-segment footprints over the segments' stretches (`records`, the 33
+    // numbers of each SEG record), keeping a piece only where its facet is within 1 ft of the segment's surface;
+    // the rest, and every other polygon, goes to `flat`. Also used by the PlayStation SF Rush converter
+    // (src/sfrush_ps1/ps1_track.cpp road_splines).
+    void cut_spline_road(const std::vector<std::array<double, 33>>& records, const std::vector<CollisionPoly>& polys,
+                         std::vector<FootprintTri>& tris, std::vector<SplinePoly>& kept, std::vector<FlatPoly>& flat,
+                         std::vector<std::string>& report, const SplineCut& cut = {});
 }
