@@ -266,9 +266,9 @@ static void test_texture_decode_and_cache() {
         bool ok = u.rgba.size() == 64;
         for (int i = 0; ok && i < 16; i++) {
             int r = i, g = 31 - i, b = (i * 2) % 32, a = i & 1;
-            // a transparent texel keeps no color (bilinear fringe)
+            // a transparent texel's color is bled from its opaque neighbors, so only its alpha is checked
             uint8_t e[4] = {(uint8_t)(a ? r * 255 / 31 : 0), (uint8_t)(a ? g * 255 / 31 : 0), (uint8_t)(a ? b * 255 / 31 : 0), (uint8_t)(a ? 255 : 0)};
-            if (std::memcmp(&u.rgba[i * 4], e, 4) != 0) {
+            if (std::memcmp(&u.rgba[i * 4], e, a ? 4 : 0) != 0 || u.rgba[i * 4 + 3] != e[3]) {
                 std::printf("FAIL texel %d: got %u,%u,%u,%u expected %u,%u,%u,%u\n", i, u.rgba[i * 4], u.rgba[i * 4 + 1], u.rgba[i * 4 + 2],
                             u.rgba[i * 4 + 3], e[0], e[1], e[2], e[3]);
                 g_failures++;

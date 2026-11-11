@@ -407,13 +407,43 @@ static inline bool tlut_is_ia16(void) {
 }
 
 static void put_rgba5551(uint8_t *out, uint16_t c) {
-    // A transparent texel keeps no color: with bilinear filtering its (often magenta) RGB would bleed into the opaque
-    // texels next to it as a fringe, which the RDP's point-sampled 1:1 rectangles never showed.
-    const bool opaque = (c & 1) != 0;
-    out[0] = opaque ? SCALE_5_8(c >> 11) : 0;
-    out[1] = opaque ? SCALE_5_8((c >> 6) & 0x1f) : 0;
-    out[2] = opaque ? SCALE_5_8((c >> 1) & 0x1f) : 0;
-    out[3] = opaque ? 255 : 0;
+    out[0] = SCALE_5_8(c >> 11);
+    out[1] = SCALE_5_8((c >> 6) & 0x1f);
+    out[2] = SCALE_5_8((c >> 1) & 0x1f);
+    out[3] = (c & 1) ? 255 : 0;
+}
+
+// A transparent texel's stored color (often magenta) must not show: bilinear filtering would bleed it into the opaque
+// texels next to it as a fringe, and an opaque-mode draw would show it as spots (the hills). Give each transparent
+// texel the average color of its opaque neighbors instead (it stays transparent); one with none keeps black.
+static void bleed_transparent_texels(uint8_t *rgba, uint32_t w, uint32_t h) {
+    static uint8_t out[8192 * 3];
+    for (uint32_t y = 0; y < h; y++) {
+        for (uint32_t x = 0; x < w; x++) {
+            const uint8_t *px = rgba + 4 * (y * w + x);
+            uint8_t *o = out + 3 * (y * w + x);
+            if (px[3] != 0) {
+                o[0] = px[0]; o[1] = px[1]; o[2] = px[2];
+                continue;
+            }
+            uint32_t sum[3] = {0, 0, 0}, n = 0;
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    int nx = (int)x + dx, ny = (int)y + dy;
+                    if (nx < 0 || ny < 0 || nx >= (int)w || ny >= (int)h) continue;
+                    const uint8_t *q = rgba + 4 * ((uint32_t)ny * w + (uint32_t)nx);
+                    if (q[3] == 0) continue;
+                    sum[0] += q[0]; sum[1] += q[1]; sum[2] += q[2]; n++;
+                }
+            }
+            o[0] = n ? (uint8_t)(sum[0] / n) : 0;
+            o[1] = n ? (uint8_t)(sum[1] / n) : 0;
+            o[2] = n ? (uint8_t)(sum[2] / n) : 0;
+        }
+    }
+    for (uint32_t i = 0; i < w * h; i++) {
+        memcpy(rgba + 4 * i, out + 3 * i, 3);
+    }
 }
 
 static void import_texture(int slot) {
@@ -486,6 +516,9 @@ static void import_texture(int slot) {
                 }
             }
         }
+    }
+    if ((t->fmt == G_IM_FMT_RGBA && t->siz == G_IM_SIZ_16b) || (t->fmt == G_IM_FMT_CI && !tlut_is_ia16())) {
+        bleed_transparent_texels(rgba, w, h);
     }
     gfx_rapi->upload_texture(rgba, w, h);
 }
