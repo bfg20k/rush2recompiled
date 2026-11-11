@@ -52,3 +52,8 @@ and still be drawn in its stored color. The cones are CI4 with palette entry 0 =
 0: black cones if the decoder zeroes transparent texels. `bleed_transparent_texels` (gfx_pc.c) gives a transparent texel
 the average of its opaque neighbors (no fringe, no spots) and keeps the stored color when it has none.
 `RUSH2_F3D_FLUSH_VERTS=1` also logs each texture import (format, size, palette, TLUT head, first TMEM row).
+
+`bleed_transparent_texels` spreads the opaque texels' colors outward ring by ring (8 passes) into the transparent ones,
+not just one texel: the speedometer digits take their alpha from a second texture (the cross-fade, combiner
+`(T1.a - T0.a) * ENV.a + T0.a`) and color from the first, so a transparent texel of the first whose stored mask color
+survived showed as a red rectangle wherever the second is opaque.

@@ -430,47 +430,67 @@ static void put_rgba5551(uint8_t *out, uint16_t c) {
     out[3] = (c & 1) ? 255 : 0;
 }
 
-// A transparent texel's stored color (often magenta) must not show: bilinear filtering would bleed it into the opaque
-// texels next to it as a fringe, and an opaque-mode draw would show it as spots (the hills). Give each transparent
-// texel the average color of its opaque neighbors instead (it stays transparent). One with none keeps its own color: a
-// texture that is transparent throughout (the traffic cones: palette entry 0 is orange with alpha 0) is drawn in opaque
-// mode, where the RDP ignores the alpha bit and shows that color.
+// A transparent texel's stored color (often a mask color) must not show: bilinear filtering would bleed it into the
+// opaque texels next to it as a fringe, and a draw that takes the alpha from a second texture (the speedometer's digit
+// cross-fade) shows it where the other texture is opaque. Give each transparent texel the average color of the
+// already colored texels around it, spreading outward from the opaque texels a ring at a time (it stays transparent).
+// A texture with no opaque texel at all keeps its stored colors: the traffic cones are one palette entry, orange with
+// alpha 0, drawn in opaque mode, where the RDP ignores the alpha bit and shows that color.
+#define BLEED_PASSES 8
 static void bleed_transparent_texels(uint8_t *rgba, uint32_t w, uint32_t h) {
-    static uint8_t *out = NULL;
-    static size_t out_size = 0;
-    if ((size_t)w * h * 3 > out_size) {
-        out_size = (size_t)w * h * 3;
-        out = (uint8_t *)realloc(out, out_size);
-        if (out == NULL) {
-            out_size = 0;
+    const size_t n = (size_t)w * h;
+    static uint8_t *colored = NULL; // per texel: 1 has a usable color, 2 got one this pass, 0 not yet
+    static size_t colored_size = 0;
+    if (n > colored_size) {
+        uint8_t *bigger = (uint8_t *)realloc(colored, n);
+        if (bigger == NULL) {
             return;
         }
+        colored = bigger;
+        colored_size = n;
     }
-    for (uint32_t y = 0; y < h; y++) {
-        for (uint32_t x = 0; x < w; x++) {
-            const uint8_t *px = rgba + 4 * (y * w + x);
-            uint8_t *o = out + 3 * (y * w + x);
-            if (px[3] != 0) {
-                o[0] = px[0]; o[1] = px[1]; o[2] = px[2];
-                continue;
-            }
-            uint32_t sum[3] = {0, 0, 0}, n = 0;
-            for (int dy = -1; dy <= 1; dy++) {
-                for (int dx = -1; dx <= 1; dx++) {
-                    int nx = (int)x + dx, ny = (int)y + dy;
-                    if (nx < 0 || ny < 0 || nx >= (int)w || ny >= (int)h) continue;
-                    const uint8_t *q = rgba + 4 * ((uint32_t)ny * w + (uint32_t)nx);
-                    if (q[3] == 0) continue;
-                    sum[0] += q[0]; sum[1] += q[1]; sum[2] += q[2]; n++;
+    bool any_opaque = false, any_clear = false;
+    for (size_t i = 0; i < n; i++) {
+        colored[i] = rgba[4 * i + 3] != 0;
+        any_opaque |= colored[i] != 0;
+        any_clear |= colored[i] == 0;
+    }
+    if (!any_opaque || !any_clear) {
+        return;
+    }
+    for (int pass = 0; pass < BLEED_PASSES; pass++) {
+        bool changed = false;
+        for (uint32_t y = 0; y < h; y++) {
+            for (uint32_t x = 0; x < w; x++) {
+                const size_t i = (size_t)y * w + x;
+                if (colored[i]) {
+                    continue;
+                }
+                uint32_t sum[3] = {0, 0, 0}, cnt = 0;
+                for (int dy = -1; dy <= 1; dy++) {
+                    for (int dx = -1; dx <= 1; dx++) {
+                        int nx = (int)x + dx, ny = (int)y + dy;
+                        if (nx < 0 || ny < 0 || nx >= (int)w || ny >= (int)h) continue;
+                        const size_t j = (size_t)ny * w + (size_t)nx;
+                        if (colored[j] != 1) continue;
+                        sum[0] += rgba[4 * j]; sum[1] += rgba[4 * j + 1]; sum[2] += rgba[4 * j + 2]; cnt++;
+                    }
+                }
+                if (cnt) {
+                    rgba[4 * i] = (uint8_t)(sum[0] / cnt);
+                    rgba[4 * i + 1] = (uint8_t)(sum[1] / cnt);
+                    rgba[4 * i + 2] = (uint8_t)(sum[2] / cnt);
+                    colored[i] = 2; // a source only from the next pass
+                    changed = true;
                 }
             }
-            o[0] = n ? (uint8_t)(sum[0] / n) : px[0];
-            o[1] = n ? (uint8_t)(sum[1] / n) : px[1];
-            o[2] = n ? (uint8_t)(sum[2] / n) : px[2];
         }
-    }
-    for (uint32_t i = 0; i < w * h; i++) {
-        memcpy(rgba + 4 * i, out + 3 * i, 3);
+        if (!changed) {
+            break;
+        }
+        for (size_t i = 0; i < n; i++) {
+            if (colored[i] == 2) colored[i] = 1;
+        }
     }
 }
 
