@@ -233,3 +233,14 @@ draws over the whole window. Inside it (`gfx_pc.c`, "widescreen"):
   area's edges. The scissor is always clipped to the game area. Not done: the texture rectangle (0x02), viewport align
   (0x07) and scissor align (0x08) commands, which the game does not emit.
 - A FILLRECT over the whole 4:3 screen (the frame clear that paints the sky color) fills the whole area.
+
+## Phase 5, second part: choosing the renderer
+
+The Graphics tab's Display section has a "Renderer (restart needed)" option (`renderer` in graphics.json: `RT64` or
+`Fast3D`, shown only in builds with `-DRUSH2_FAST3D=ON`). `rush2::fast3d::requested()` decides once, before the window
+is created: `RUSH2_RENDERER=fast3d` or `rt64` overrides it, otherwise it reads graphics.json directly (the config system
+isn't loaded yet). With Fast3D chosen, `hide_rt64_only_options` (src/config.cpp) hides what only RT64 draws with:
+resolution scale, downsampling, refresh rate, API, MSAA, anisotropy, distant textures, ambient occlusion, sky fog, the car
+effects, hi-res fonts and the texture pack options. The option is new, so there is nothing to migrate; a missing key is
+RT64. The game was not built or run for this change (the submodules are not checked out in the review tree), so the
+config edit is untested outside this description.

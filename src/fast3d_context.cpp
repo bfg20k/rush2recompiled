@@ -7,6 +7,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <string>
 
 #if defined(_WIN32)
 #include "SDL.h"
@@ -14,6 +17,8 @@
 #include "SDL2/SDL.h"
 #endif
 
+#include "json/json.hpp"
+#include "librecomp/game.hpp"
 #include "recompui/recompui.h"
 #include "ultramodern/config.hpp"
 #include "ui_gl_renderer.h"
@@ -237,9 +242,35 @@ private:
 
 } // namespace
 
+// The Renderer option (src/config.cpp) as graphics.json holds it, read once before the window is created. A missing
+// file, key or an unknown value is RT64.
+static bool saved_choice_is_fast3d() {
+    std::ifstream file(recomp::get_config_path() / "graphics.json");
+    if (!file.good()) {
+        return false;
+    }
+    nlohmann::json j = nlohmann::json::parse(file, nullptr, false);
+    if (j.is_discarded() || !j.is_object() || !j.contains("renderer")) {
+        return false;
+    }
+    const nlohmann::json& v = j["renderer"];
+    if (v.is_string()) {
+        return v.get<std::string>() == "Fast3D";
+    }
+    return v.is_number_integer() && v.get<int>() == 1;
+}
+
 bool requested() {
-    const char* value = std::getenv("RUSH2_RENDERER");
-    return value != nullptr && std::strcmp(value, "fast3d") == 0;
+    // RUSH2_RENDERER=fast3d or rt64 overrides the saved option (the tools and tests set it). Decided once: the window
+    // flags and the render context must agree.
+    static const bool fast3d = []() {
+        const char* value = std::getenv("RUSH2_RENDERER");
+        if (value != nullptr && value[0] != '\0') {
+            return std::strcmp(value, "fast3d") == 0;
+        }
+        return saved_choice_is_fast3d();
+    }();
+    return fast3d;
 }
 
 std::unique_ptr<ultramodern::renderer::RendererContext> create_context(uint8_t* rdram, SDL_Window* window) {

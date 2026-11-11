@@ -13,6 +13,7 @@
 #include "librecomp/game.hpp"
 #include "util/file.h"
 #include "common/rt64_enhancement_configuration.h"
+#include "fast3d_context.h"
 
 #include "circuit.h"
 #include "npc_cars.h"
@@ -309,6 +310,37 @@ static void add_font_option(recomp::config::Config& config) {
             rush2::set_hires_fonts_enabled(static_cast<FontMode>(std::get<uint32_t>(cur_value)) == FontMode::HighResolution);
         });
 }
+
+#ifdef RUSH2_FAST3D
+namespace renderer_option {
+    const std::string id = "renderer";
+    enum class Renderer : uint32_t { RT64, Fast3D };
+}
+
+// Picks the renderer (docs/fast3d_port_plan.md). It is read from graphics.json before the window is created
+// (rush2::fast3d::requested), so a change applies the next time the game starts; RUSH2_RENDERER=fast3d or rt64
+// overrides it.
+static void add_renderer_option(recomp::config::Config& config) {
+    using renderer_option::Renderer;
+
+    config.add_enum_option(
+        renderer_option::id,
+        "Renderer (restart needed)",
+        "Sets what draws the game. <recomp-color primary>RT64</recomp-color> is the full renderer: it needs Vulkan, "
+        "Direct3D 12 or Metal, and has every graphics option on this page. "
+        "<recomp-color primary>Fast3D</recomp-color> is an experimental OpenGL 2.1 renderer for computers that "
+        "can't run RT64; it hides the options it doesn't support (resolution scale, anti-aliasing, texture packs and "
+        "effects, and frame interpolation are RT64's). <recomp-color secondary>Takes effect the next time the game "
+        "starts.</recomp-color>",
+        {
+            { Renderer::RT64, "RT64", "RT64" },
+            { Renderer::Fast3D, "Fast3D", "Fast3D (experimental)" },
+        },
+        Renderer::RT64
+    );
+}
+
+#endif
 
 namespace mipmap_option {
     const std::string id = "texture_mipmaps";
@@ -1009,6 +1041,22 @@ static void add_data_location_option(recomp::config::Config& config) {
         });
 }
 
+#ifdef RUSH2_FAST3D
+// Hides the options only RT64 draws with, when Fast3D is the renderer.
+static void hide_rt64_only_options(recomp::config::Config& config) {
+    namespace go = recompui::config::graphics::options;
+    for (const std::string& id : std::vector<std::string>{ go::res_option, go::ds_option, go::hr_option, go::rr_option, go::rr_manual_value, go::api_option,
+                                   go::msaa_option, anisotropy_option::id, mipmap_option::id, ambient_occlusion_option::id,
+                                   sky_fog_option::id, car_lighting_option::id, car_sheen_option::id, car_reflections_option::id,
+                                   reflection_blur_option::id, reflection_rate_option::id, font_option::id,
+                                   rush2::upscale::dreamcast_option_id, rush2::upscale::interface_option_id,
+                                   rush2::upscale::car_colors_option_id, rush2::upscale::mode_option_id,
+                                   rush2::upscale::command_option_id }) {
+        config.update_option_hidden(id, true);
+    }
+}
+#endif
+
 void rush2::init_config() {
     std::filesystem::path recomp_dir = recomp::get_config_path();
     if (!recomp_dir.empty()) {
@@ -1056,10 +1104,14 @@ void rush2::init_config() {
             } },
         });
         namespace graphics = recompui::config::graphics;
+        std::vector<std::string> display_options = { graphics::options::wm_option, graphics::options::res_option, graphics::options::ds_option,
+                                                     graphics::options::ar_option, graphics::options::hr_option, graphics::options::rr_option,
+                                                     graphics::options::rr_manual_value, graphics::options::api_option };
+#ifdef RUSH2_FAST3D
+        display_options.push_back(renderer_option::id);
+#endif
         create_ordered_tab(graphics::tab_name, "rush2_graphics", graphics::id, 3, {
-            { "Display", { graphics::options::wm_option, graphics::options::res_option, graphics::options::ds_option, graphics::options::ar_option,
-                           graphics::options::hr_option, graphics::options::rr_option, graphics::options::rr_manual_value,
-                           graphics::options::api_option } },
+            { "Display", display_options },
             { "Quality", { graphics::options::msaa_option, anisotropy_option::id, mipmap_option::id, lod_option::id, draw_distance_option::id, font_option::id }, true },
             { "Effects", { ambient_occlusion_option::id, sky_fog_option::id, car_lighting_option::id, car_sheen_option::id, car_reflections_option::id, reflection_blur_option::id, reflection_rate_option::id } },
             { "Textures", { rush2::upscale::dreamcast_option_id, rush2::upscale::interface_option_id,
@@ -1107,6 +1159,9 @@ void rush2::init_config() {
     add_car_sheen_option(graphics_config);
     add_car_reflections_option(graphics_config);
     add_split_option(graphics_config);
+#ifdef RUSH2_FAST3D
+    add_renderer_option(graphics_config);
+#endif
     rush2::upscale::add_options(graphics_config);
     recompui::config::set_tab_visible(recompui::config::general::id, false);
     recompui::config::set_tab_visible(recompui::config::graphics::id, false);
@@ -1134,6 +1189,11 @@ void rush2::init_config() {
         std::get<uint32_t>(loaded_graphics_config.get_option_value(lod_option::id))) == lod_option::LODMode::Off);
     rush2::set_draw_distance(draw_distance_option::factor(
         loaded_graphics_config.get_option_value(draw_distance_option::id)));
+#ifdef RUSH2_FAST3D
+    if (rush2::fast3d::requested()) {
+        hide_rt64_only_options(loaded_graphics_config);
+    }
+#endif
     RT64::GeneratedMipmapsEnabled = static_cast<mipmap_option::Mipmaps>(
         std::get<uint32_t>(loaded_graphics_config.get_option_value(mipmap_option::id))) == mipmap_option::Mipmaps::Smooth;
     RT64::GeneratedMipmapsAnisotropy = std::min(
