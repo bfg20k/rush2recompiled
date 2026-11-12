@@ -77,3 +77,10 @@ rectangles nearest (`gfx_set_hud_filtering`, `rect_point` in gfx_pc.c). The repl
   and runs backwards, so the range is moved one texel (`pixel k shows floor(s0 - k)`); without it each strip's rows
   came from one texel off and showed as dark/bright lines at every strip. `RUSH2_F3D_RECTUV=1` prints each rect's
   uls/ult/dsdx/dtdy in the replay tool. Test frame: the user's frame 220 (legal screen).
+
+### Speedometer/score digit boxes: tiles that magnify their coordinates
+The big digits are a 2-cycle crossfade whose TEXEL1 is tile 1, the same CI8 data viewed as CI4 with `shifts = 15`
+(s' = 2s) and a 32 texel mask over a 16 texel size window. The RDP reads up to the mask, so the CI4 view is 32 texels
+wide; limiting it to the window repeated half a row and the mask alpha filled the digit cells with translucent boxes.
+`tile_dims` now widens a wrap tile with a magnifying S shift to its mask. Test frame: user frame 2400 (flush 40-42).
+`RUSH2_F3D_DUMP_SLOT=0|1` picks which texture slot `RUSH2_F3D_DUMP_TEX` dumps.

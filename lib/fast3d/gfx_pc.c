@@ -371,6 +371,8 @@ static uint32_t tile_stride(const struct TileDesc *t) {
     return (uint32_t)t->line * 8 * (t->siz == G_IM_SIZ_32b ? 2 : 1);
 }
 
+static inline float tile_shift_scale(uint8_t shift);
+
 // The region of the tile a draw samples: from G_SETTILESIZE, limited by the tile's line and by the mask (a power-of-two
 // repeat). Falls back to the line's full width when no sane size was set.
 static void tile_dims(const struct TileDesc *t, uint32_t *x0, uint32_t *y0, uint32_t *w, uint32_t *h) {
@@ -388,6 +390,11 @@ static void tile_dims(const struct TileDesc *t, uint32_t *x0, uint32_t *y0, uint
         hh = max_h; // before the masks, so a tile with no size still repeats at its mask
     }
     if (t->masks != 0 && (1u << t->masks) < ww) {
+        ww = 1u << t->masks;
+    } else if (t->masks != 0 && t->cms == 0 && tile_shift_scale(t->shifts) > 1.0f && (1u << t->masks) <= max_w) {
+        // A tile that magnifies its coordinates (shift S = 15, s' = 2s) reads past its size window up to the mask: the
+        // speedometer's crossfade mask views the CI8 digit as 4-bit, 32 texels wide for a 16 texel cell. The window
+        // alone would make the shader repeat the half row that fits.
         ww = 1u << t->masks;
     }
     if (t->maskt != 0 && (1u << t->maskt) < hh) {
@@ -584,7 +591,7 @@ static void import_texture(int slot) {
     if ((t->fmt == G_IM_FMT_RGBA && t->siz == G_IM_SIZ_16b) || (t->fmt == G_IM_FMT_CI && !tlut_is_ia16())) {
         bleed_transparent_texels(rgba, w, h);
     }
-    if (getenv("RUSH2_F3D_DUMP_TEX") && (int)atoi(getenv("RUSH2_F3D_DUMP_TEX")) == dbg_flush_no) {
+    if (getenv("RUSH2_F3D_DUMP_TEX") && (int)atoi(getenv("RUSH2_F3D_DUMP_TEX")) == dbg_flush_no && (!getenv("RUSH2_F3D_DUMP_SLOT") || atoi(getenv("RUSH2_F3D_DUMP_SLOT")) == slot)) {
         FILE *f = fopen("tmp/user1/tex.ppm", "wb");
         fprintf(f, "P6\n%u %u\n255\n", w, h);
         for (uint32_t k = 0; k < w * h; k++) { if (getenv("TEXA")) { for (int q = 0; q < 3; q++) fputc(rgba[4 * k + 3], f); } else fwrite(rgba + 4 * k, 1, 3, f); }
