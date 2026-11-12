@@ -66,3 +66,6 @@ upscaled. Copy-cycle rectangles may read one texel past the window. Remaining th
 the piece textures (152x13 CI8) have an opaque dim last-but-one row and a transparent last row, so they show with
 nearest filtering too. `RUSH2_F3D_DUMP_TEX=<flush>` (replay tool) writes that flush's decoded texture to
 `tmp/user1/tex.ppm` (`TEXA=1` writes the alpha channel instead).
+
+HUD Filtering option (Graphics > Display, Fast3D only, hot-swappable, default Smooth): Sharp samples 2D texture
+rectangles nearest (`gfx_set_hud_filtering`, `rect_point` in gfx_pc.c). The replay tool takes `RUSH2_F3D_HUD_SHARP=1`.

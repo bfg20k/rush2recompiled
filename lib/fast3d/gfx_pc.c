@@ -170,6 +170,9 @@ static void dbg_note_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry);
 
 // Debugging (replay tool): RUSH2_F3D_DRAW_RANGE=a,b draws only flushes number a..b-1 of the frame (read once).
 static uint64_t dbg_last_cc_id;
+static volatile int hud_filter_off; // option: 2D texture rectangles (HUD, menus) sample nearest instead of bilinear
+static bool rect_point;             // the rectangle being drawn is sampled nearest (hud_filter_off)
+void gfx_set_hud_filtering(bool on) { hud_filter_off = !on; }
 static bool rect_force_clamp; // the textured rectangle being drawn samples its texture clamped to the tile's window
 
 // The game area's offset in the window, in pixels (GL's origin, bottom left). The game's own coordinates are within it.
@@ -979,7 +982,7 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
                 rdp.textures_changed[i] = false;
             }
             const struct TileDesc *st = &rdp.tiles[(tex_level + i) & 7];
-            bool linear_filter = (rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT;
+            bool linear_filter = (rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT && !rect_point;
             const uint8_t cms = rect_force_clamp ? G_TX_CLAMP : st->cms, cmt = rect_force_clamp ? G_TX_CLAMP : st->cmt;
             if (linear_filter != rendering_state.textures[i]->linear_filter || cms != rendering_state.textures[i]->cms || cmt != rendering_state.textures[i]->cmt) {
                 gfx_flush();
@@ -1014,7 +1017,7 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
         if (use_texture) {
             float u = (v_arr[i]->u * tile_shift_scale(prim_tile->shifts) - prim_tile->uls * 8) / 32.0f;
             float v = (v_arr[i]->v * tile_shift_scale(prim_tile->shiftt) - prim_tile->ult * 8) / 32.0f;
-            if ((rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT) {
+            if ((rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT && !rect_point) {
                 // Linear filter adds 0.5f to the coordinates
                 u += 0.5f;
                 v += 0.5f;
@@ -1494,6 +1497,7 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
     // sampled clamped to the edge, which leaves the texels as drawn; and a side that stops short of the window's edge
     // (an atlas) is pulled in half a texel to keep the neighbors out. A tiling rectangle (beyond the window) is left alone.
     rect_force_clamp = false;
+    rect_point = hud_filter_off != 0;
     {
         const bool copy_cycle = (rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_COPY;
         const bool bilinear = (rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT && !copy_cycle;
@@ -1560,6 +1564,7 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
         rdp.textures_changed[0] = rdp.textures_changed[1] = true;
     }
     gfx_draw_rectangle(ulx, uly, lrx, lry);
+    rect_point = false;
     rect_force_clamp = false;
     if (tex_level != saved_tex_level) {
         gfx_flush();

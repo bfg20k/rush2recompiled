@@ -43,6 +43,7 @@ int main(int argc, char **argv) {
     ReadPixelsFn read_pixels = (ReadPixelsFn)SDL_GL_GetProcAddress("glReadPixels");
     gfx_init_embedded(&gfx_opengl_api, rdram);
     gfx_set_dimensions(w, h);
+    if (getenv("RUSH2_F3D_HUD_SHARP")) gfx_set_hud_filtering(false); // HUD Filtering = Sharp
     gfx_begin_frame();
 
     uint32_t head[3];

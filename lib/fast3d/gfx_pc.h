@@ -22,6 +22,8 @@ extern "C" {
 void gfx_init_embedded(struct GfxRenderingAPI *rapi, uint8_t *rdram);
 // The drawable size in pixels; the 320x240 N64 screen is scaled to it.
 void gfx_set_dimensions(uint32_t width, uint32_t height);
+// Off: 2D texture rectangles (HUD, menus) are sampled nearest instead of bilinear. Callable from any thread.
+void gfx_set_hud_filtering(bool on);
 void gfx_set_game_area(int x, int y, uint32_t width, uint32_t height);
 struct GfxRenderingAPI *gfx_get_current_rendering_api(void);
 void gfx_begin_frame(void);

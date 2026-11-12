@@ -14,6 +14,9 @@
 #include "util/file.h"
 #include "common/rt64_enhancement_configuration.h"
 #include "fast3d_context.h"
+#ifdef RUSH2_FAST3D
+#include "gfx_pc.h"
+#endif
 
 #include "circuit.h"
 #include "npc_cars.h"
@@ -316,6 +319,36 @@ static void add_font_option(recomp::config::Config& config) {
 namespace renderer_option {
     const std::string id = "renderer";
     enum class Renderer : uint32_t { RT64, Fast3D };
+}
+
+namespace hud_filter_option {
+    const std::string id = "fast3d_hud_filtering";
+    enum class Filtering : uint32_t { Smooth, Sharp };
+}
+
+// Fast3D only: whether the HUD and menus (2D texture rectangles) are smoothed when the screen is bigger than the
+// N64's 320x240. Sharp samples the nearest texel, so pixel art keeps hard edges and no filtering seams show.
+// Applies at once.
+static void add_hud_filter_option(recomp::config::Config& config) {
+    using hud_filter_option::Filtering;
+
+    config.add_enum_option(
+        hud_filter_option::id,
+        "HUD Filtering",
+        "Sets how the HUD and menus are scaled up. <recomp-color primary>Smooth</recomp-color> blends neighboring "
+        "pixels like the original console. <recomp-color primary>Sharp</recomp-color> keeps every pixel's hard edge "
+        "and avoids faint lines between the pieces of big sprites. Only the Fast3D renderer uses this.",
+        {
+            { Filtering::Smooth, "Smooth", "Smooth" },
+            { Filtering::Sharp, "Sharp", "Sharp" },
+        },
+        Filtering::Smooth
+    );
+
+    config.add_option_change_callback(hud_filter_option::id,
+        [](recomp::config::ConfigValueVariant cur_value, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext) {
+            gfx_set_hud_filtering(static_cast<Filtering>(std::get<uint32_t>(cur_value)) == Filtering::Smooth);
+        });
 }
 
 // Picks the renderer (docs/fast3d_port_plan.md). It is read from graphics.json before the window is created
@@ -1169,6 +1202,7 @@ void rush2::init_config() {
                                                      graphics::options::rr_manual_value, graphics::options::api_option };
 #ifdef RUSH2_FAST3D
         display_options.push_back(renderer_option::id);
+        display_options.push_back(hud_filter_option::id);
 #endif
         create_ordered_tab(graphics::tab_name, "rush2_graphics", graphics::id, 3, {
             { "Display", display_options },
@@ -1223,6 +1257,7 @@ void rush2::init_config() {
     add_split_option(graphics_config);
 #ifdef RUSH2_FAST3D
     add_renderer_option(graphics_config);
+    add_hud_filter_option(graphics_config);
 #endif
     rush2::upscale::add_options(graphics_config);
     recompui::config::set_tab_visible(recompui::config::general::id, false);
@@ -1254,6 +1289,10 @@ void rush2::init_config() {
 #ifdef RUSH2_FAST3D
     if (rush2::fast3d::requested()) {
         hide_rt64_only_options(loaded_graphics_config);
+        gfx_set_hud_filtering(static_cast<hud_filter_option::Filtering>(
+            std::get<uint32_t>(loaded_graphics_config.get_option_value(hud_filter_option::id))) == hud_filter_option::Filtering::Smooth);
+    } else {
+        loaded_graphics_config.update_option_hidden(hud_filter_option::id, true);
     }
 #endif
     RT64::GeneratedMipmapsEnabled = static_cast<mipmap_option::Mipmaps>(
