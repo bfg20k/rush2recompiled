@@ -57,3 +57,12 @@ the average of its opaque neighbors (no fringe, no spots) and keeps the stored c
 not just one texel: the speedometer digits take their alpha from a second texture (the cross-fade, combiner
 `(T1.a - T0.a) * ENV.a + T0.a`) and color from the first, so a transparent texel of the first whose stored mask color
 survived showed as a red rectangle wherever the second is opaque.
+
+## Rectangle sampling at tile edges (HUD glyphs and big sprites)
+
+A texture rectangle inside its tile's window is sampled with clamp (never wrap, which bled the opposite edge as a line
+around digits and sprites); sides that stop short of the window's edge (atlas glyphs) are pulled in half a texel when
+upscaled. Copy-cycle rectangles may read one texel past the window. Remaining thin lines in the car-select bar are art:
+the piece textures (152x13 CI8) have an opaque dim last-but-one row and a transparent last row, so they show with
+nearest filtering too. `RUSH2_F3D_DUMP_TEX=<flush>` (replay tool) writes that flush's decoded texture to
+`tmp/user1/tex.ppm` (`TEXA=1` writes the alpha channel instead).

@@ -170,6 +170,8 @@ static void dbg_note_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry);
 
 // Debugging (replay tool): RUSH2_F3D_DRAW_RANGE=a,b draws only flushes number a..b-1 of the frame (read once).
 static uint64_t dbg_last_cc_id;
+static bool rect_force_clamp; // the textured rectangle being drawn samples its texture clamped to the tile's window
+
 // The game area's offset in the window, in pixels (GL's origin, bottom left). The game's own coordinates are within it.
 static int game_area_x, game_area_y;
 
@@ -578,6 +580,13 @@ static void import_texture(int slot) {
     if ((t->fmt == G_IM_FMT_RGBA && t->siz == G_IM_SIZ_16b) || (t->fmt == G_IM_FMT_CI && !tlut_is_ia16())) {
         bleed_transparent_texels(rgba, w, h);
     }
+    if (getenv("RUSH2_F3D_DUMP_TEX") && (int)atoi(getenv("RUSH2_F3D_DUMP_TEX")) == dbg_flush_no) {
+        FILE *f = fopen("tmp/user1/tex.ppm", "wb");
+        fprintf(f, "P6\n%u %u\n255\n", w, h);
+        for (uint32_t k = 0; k < w * h; k++) { if (getenv("TEXA")) { for (int q = 0; q < 3; q++) fputc(rgba[4 * k + 3], f); } else fwrite(rgba + 4 * k, 1, 3, f); }
+        fclose(f);
+        fprintf(stderr, "dumped texture %ux%u\n", w, h);
+    }
     gfx_rapi->upload_texture(rgba, w, h);
 }
 
@@ -971,12 +980,13 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
             }
             const struct TileDesc *st = &rdp.tiles[(tex_level + i) & 7];
             bool linear_filter = (rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT;
-            if (linear_filter != rendering_state.textures[i]->linear_filter || st->cms != rendering_state.textures[i]->cms || st->cmt != rendering_state.textures[i]->cmt) {
+            const uint8_t cms = rect_force_clamp ? G_TX_CLAMP : st->cms, cmt = rect_force_clamp ? G_TX_CLAMP : st->cmt;
+            if (linear_filter != rendering_state.textures[i]->linear_filter || cms != rendering_state.textures[i]->cms || cmt != rendering_state.textures[i]->cmt) {
                 gfx_flush();
-                gfx_rapi->set_sampler_parameters(i, linear_filter, st->cms, st->cmt);
+                gfx_rapi->set_sampler_parameters(i, linear_filter, cms, cmt);
                 rendering_state.textures[i]->linear_filter = linear_filter;
-                rendering_state.textures[i]->cms = st->cms;
-                rendering_state.textures[i]->cmt = st->cmt;
+                rendering_state.textures[i]->cms = cms;
+                rendering_state.textures[i]->cmt = cmt;
             }
         }
     }
@@ -1477,14 +1487,50 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
     struct LoadedVertex* lr = &rsp.loaded_vertices[MAX_VERTICES + 2];
     struct LoadedVertex* ur = &rsp.loaded_vertices[MAX_VERTICES + 3];
     float u0 = uls, v0 = ult, u1 = lrs, v1 = lrt;
-    // The RDP samples a 1:1 rectangle exactly on texel centers, so bilinear never reaches outside it. Drawn larger than
-    // 320x240, GL's bilinear filter blends the rectangle's edge pixels with the texels next to it (the next glyph, or the
-    // far side of a wrapped tile). Pulling each end in by half a texel keeps every sample inside the rectangle's texels.
-    if ((rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT && (rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) != G_CYC_COPY &&
-        gfx_current_dimensions.height > 240 + 8) {
-        const float half = 16.0f; // half a texel in S10.5
-        if (u1 > u0 + 2 * half) { u0 += half; u1 -= half; } else if (u0 > u1 + 2 * half) { u0 -= half; u1 += half; }
-        if (v1 > v0 + 2 * half) { v0 += half; v1 -= half; } else if (v0 > v1 + 2 * half) { v0 -= half; v1 += half; }
+    // The RDP samples a 1:1 rectangle exactly on texel centers, so its filter never reaches outside it. GL's bilinear
+    // filter, on a larger window, blends the rectangle's edge pixels with the texels next to its range: the far side of
+    // a wrapped tile (a line along the sprite's edge, glyphs and bars with cut-off or doubled edges, seams between the
+    // pieces of a big sprite) or the next glyph of an atlas. So a rectangle that stays inside its tile's window is
+    // sampled clamped to the edge, which leaves the texels as drawn; and a side that stops short of the window's edge
+    // (an atlas) is pulled in half a texel to keep the neighbors out. A tiling rectangle (beyond the window) is left alone.
+    rect_force_clamp = false;
+    {
+        const bool copy_cycle = (rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_COPY;
+        const bool bilinear = (rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT && !copy_cycle;
+        const struct TileDesc *td = &rdp.tiles[tile & 7];
+        uint32_t wx0, wy0, ww, wh;
+        tile_dims(td, &wx0, &wy0, &ww, &wh);
+        const float ss = tile_shift_scale(td->shifts), st = tile_shift_scale(td->shiftt);
+        // Window-relative texels of the rectangle's ends.
+        float su0 = (u0 * ss - td->uls * 8) / 32.0f, su1 = (u1 * ss - td->uls * 8) / 32.0f;
+        float tv0 = (v0 * st - td->ult * 8) / 32.0f, tv1 = (v1 * st - td->ult * 8) / 32.0f;
+        const float eps = 1.0f / 16.0f;
+        // A copy cycle rectangle covers one more pixel than its size, so it reads one texel past the window: that texel is
+        // the edge's (the pieces of a big sprite overlap by that pixel; wrapping showed the opposite edge as a line).
+        const float over = copy_cycle ? 1.0f + eps : eps;
+        const float smin = su0 < su1 ? su0 : su1, smax = su0 < su1 ? su1 : su0;
+        const float tmin = tv0 < tv1 ? tv0 : tv1, tmax = tv0 < tv1 ? tv1 : tv0;
+        if (ww > 0 && wh > 0 && smin >= -eps && smax <= (float)ww + over && tmin >= -eps && tmax <= (float)wh + over) {
+            rect_force_clamp = true;
+            if (bilinear && gfx_current_dimensions.height > 240 + 8) {
+                const float half = 16.0f; // half a texel in S10.5
+                // Pull in only the sides that don't reach the window's edge, where clamping already holds the texels.
+                if (su0 < su1) {
+                    if (su0 > eps && su1 > su0 + 1.0f) u0 += half / ss;
+                    if (su1 < (float)ww - eps && su1 > su0 + 1.0f) u1 -= half / ss;
+                } else if (su1 < su0) {
+                    if (su1 > eps && su0 > su1 + 1.0f) u1 += half / ss;
+                    if (su0 < (float)ww - eps && su0 > su1 + 1.0f) u0 -= half / ss;
+                }
+                if (tv0 < tv1) {
+                    if (tv0 > eps && tv1 > tv0 + 1.0f) v0 += half / st;
+                    if (tv1 < (float)wh - eps && tv1 > tv0 + 1.0f) v1 -= half / st;
+                } else if (tv1 < tv0) {
+                    if (tv1 > eps && tv0 > tv1 + 1.0f) v1 += half / st;
+                    if (tv0 < (float)wh - eps && tv0 > tv1 + 1.0f) v0 -= half / st;
+                }
+            }
+        }
     }
     ul->u = u0;
     ul->v = v0;
@@ -1514,6 +1560,7 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
         rdp.textures_changed[0] = rdp.textures_changed[1] = true;
     }
     gfx_draw_rectangle(ulx, uly, lrx, lry);
+    rect_force_clamp = false;
     if (tex_level != saved_tex_level) {
         gfx_flush();
         tex_level = saved_tex_level;
