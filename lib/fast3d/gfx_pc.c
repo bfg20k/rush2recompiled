@@ -171,6 +171,7 @@ static void dbg_note_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry);
 // Debugging (replay tool): RUSH2_F3D_DRAW_RANGE=a,b draws only flushes number a..b-1 of the frame (read once).
 static uint64_t dbg_last_cc_id;
 static volatile int hud_filter_off; // option: 2D texture rectangles (HUD, menus) sample nearest instead of bilinear
+static bool in_rect;                // a texture rectangle is being drawn: its coordinates are not shifted by half a texel
 static bool rect_point;             // the rectangle being drawn is sampled nearest (hud_filter_off)
 void gfx_set_hud_filtering(bool on) { hud_filter_off = !on; }
 static bool rect_force_clamp; // the textured rectangle being drawn samples its texture clamped to the tile's window
@@ -1017,8 +1018,8 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
         if (use_texture) {
             float u = (v_arr[i]->u * tile_shift_scale(prim_tile->shifts) - prim_tile->uls * 8) / 32.0f;
             float v = (v_arr[i]->v * tile_shift_scale(prim_tile->shiftt) - prim_tile->ult * 8) / 32.0f;
-            if ((rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT && !rect_point) {
-                // Linear filter adds 0.5f to the coordinates
+            if ((rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT && !rect_point && !in_rect) {
+                // Linear filter adds 0.5f (not for rectangles, below) to the coordinates
                 u += 0.5f;
                 v += 0.5f;
             }
@@ -1490,6 +1491,21 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
     struct LoadedVertex* lr = &rsp.loaded_vertices[MAX_VERTICES + 2];
     struct LoadedVertex* ur = &rsp.loaded_vertices[MAX_VERTICES + 3];
     float u0 = uls, v0 = ult, u1 = lrs, v1 = lrt;
+    // A rectangle that runs backwards through its texture (negative dsdx/dtdy, or a flipped one) starts at the texel its
+    // first pixel shows, so it ends one texel before the window's edge: pixel k shows floor(s0 - k). The pixel centers
+    // GL samples at sit half a step further along, so a backwards range moves one texel up to land on the same texels
+    // (otherwise every pixel shows its neighbor, and the logo strips' first row came from the next strip, as lines).
+    {
+        const int pw = (width < 0 ? -width : width) >> 2, ph = (height < 0 ? -height : height) >> 2;
+        if (u1 < u0 && pw > 0) {
+            float step = (u0 - u1) / (float)pw, sh = step < 32.0f ? step : 32.0f;
+            u0 += sh; u1 += sh;
+        }
+        if (v1 < v0 && ph > 0) {
+            float step = (v0 - v1) / (float)ph, sh = step < 32.0f ? step : 32.0f;
+            v0 += sh; v1 += sh;
+        }
+    }
     // The RDP samples a 1:1 rectangle exactly on texel centers, so its filter never reaches outside it. GL's bilinear
     // filter, on a larger window, blends the rectangle's edge pixels with the texels next to its range: the far side of
     // a wrapped tile (a line along the sprite's edge, glyphs and bars with cut-off or doubled edges, seams between the
@@ -1498,6 +1514,7 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
     // (an atlas) is pulled in half a texel to keep the neighbors out. A tiling rectangle (beyond the window) is left alone.
     rect_force_clamp = false;
     rect_point = hud_filter_off != 0;
+    in_rect = true;
     {
         const bool copy_cycle = (rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_COPY;
         const bool bilinear = (rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT && !copy_cycle;
@@ -1565,6 +1582,7 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
     }
     gfx_draw_rectangle(ulx, uly, lrx, lry);
     rect_point = false;
+    in_rect = false;
     rect_force_clamp = false;
     if (tex_level != saved_tex_level) {
         gfx_flush();
@@ -2180,6 +2198,7 @@ static void gfx_run_dl(Gfx* cmd) {
                 dsdx = C1(16, 16);
                 dtdy = C1(0, 16);
 #endif
+                if (getenv("RUSH2_F3D_RECTUV")) fprintf(stderr, "rect uv: uls=%d ult=%d dsdx=%d dtdy=%d tile=%d\n", (int16_t)uls, (int16_t)ult, (int16_t)dsdx, (int16_t)dtdy, tile);
                 gfx_dp_texture_rectangle(ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, opcode == G_TEXRECTFLIP);
                 break;
             }

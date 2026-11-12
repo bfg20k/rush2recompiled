@@ -62,10 +62,18 @@ survived showed as a red rectangle wherever the second is opaque.
 
 A texture rectangle inside its tile's window is sampled with clamp (never wrap, which bled the opposite edge as a line
 around digits and sprites); sides that stop short of the window's edge (atlas glyphs) are pulled in half a texel when
-upscaled. Copy-cycle rectangles may read one texel past the window. Remaining thin lines in the car-select bar are art:
+upscaled. Copy-cycle rectangles may read one texel past the window. (The thin lines once seen in the car-select bar were the half-texel shift below, not art.)
 the piece textures (152x13 CI8) have an opaque dim last-but-one row and a transparent last row, so they show with
 nearest filtering too. `RUSH2_F3D_DUMP_TEX=<flush>` (replay tool) writes that flush's decoded texture to
 `tmp/user1/tex.ppm` (`TEXA=1` writes the alpha channel instead).
 
 HUD Filtering option (Graphics > Display, Fast3D only, hot-swappable, default Smooth): Sharp samples 2D texture
 rectangles nearest (`gfx_set_hud_filtering`, `rect_point` in gfx_pc.c). The replay tool takes `RUSH2_F3D_HUD_SHARP=1`.
+
+### Rectangles: no half-texel shift, backwards ranges (Midway logo, legal text)
+- Triangles add 0.5 texel to bilinear coordinates; texture rectangles must not (`in_rect`): with it every 1:1 pixel
+  blended two texels, shifting and blurring sprites and bleeding neighbors (ticks under atlas glyphs, seam lines).
+- A rectangle with negative dtdy/dsdx (the Midway logo strips have dtdy=-1024) starts at the texel of its first pixel
+  and runs backwards, so the range is moved one texel (`pixel k shows floor(s0 - k)`); without it each strip's rows
+  came from one texel off and showed as dark/bright lines at every strip. `RUSH2_F3D_RECTUV=1` prints each rect's
+  uls/ult/dsdx/dtdy in the replay tool. Test frame: the user's frame 220 (legal screen).
