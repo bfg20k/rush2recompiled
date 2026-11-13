@@ -74,6 +74,11 @@ struct TextureHashmapNode {
     uint32_t texture_id;
     uint8_t cms, cmt;
     bool linear_filter;
+    // Texture hooks (gfx_set_texture_hooks): the replacement hash, the registry generation last checked, the serial of
+    // the replacement shown (0 = the game's own texture) and whether the hash was told about a 3D draw.
+    uint64_t rhash;
+    uint32_t gen, rserial;
+    bool has_hash, replaced, seen_world;
 };
 static struct {
     struct TextureHashmapNode *hashmap[1024];
@@ -299,6 +304,10 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, ui
     (*node)->cms = 0;
     (*node)->cmt = 0;
     (*node)->linear_filter = false;
+    (*node)->rhash = 0;
+    (*node)->gen = 0;
+    (*node)->rserial = 0;
+    (*node)->has_hash = (*node)->replaced = (*node)->seen_world = false;
     (*node)->next = NULL;
     (*node)->texture_key = orig_addr;
     (*node)->fmt = fmt;
@@ -507,6 +516,54 @@ static void bleed_transparent_texels(uint8_t *rgba, uint32_t w, uint32_t h) {
     }
 }
 
+// Texture replacement hooks (see gfx_pc.h). Uploads of replacement images are limited per frame so a burst of new
+// replacements (a race's mod car textures) spreads over a few frames instead of stalling one.
+static const struct GfxTextureHooks *tex_hooks;
+static int replacement_uploads;
+#define F3D_REPLACEMENT_UPLOADS_PER_FRAME 2
+
+void gfx_set_texture_hooks(const struct GfxTextureHooks *hooks) {
+    tex_hooks = hooks;
+}
+
+static void upload_replacement(const uint8_t *rgba, uint32_t w, uint32_t h, void *ctx) {
+    (void)ctx;
+    gfx_rapi->upload_texture(rgba, w, h);
+}
+
+// Shows node n's replacement if there is one. Returns true when the node now shows a replacement (or already did).
+static bool apply_replacement(struct TextureHashmapNode *n) {
+    if (replacement_uploads >= F3D_REPLACEMENT_UPLOADS_PER_FRAME) {
+        n->gen = 0; // look again at the next import
+        return n->replaced;
+    }
+    uint32_t serial = n->rserial;
+    int r = tex_hooks->replace(n->rhash, &serial, upload_replacement, NULL);
+    if (r == 0) {
+        return false;
+    }
+    if (r == 2) {
+        replacement_uploads++;
+    }
+    n->rserial = serial;
+    n->replaced = true;
+    return true;
+}
+
+static void notify_drawn(const struct TileDesc *t, struct TextureHashmapNode *n) {
+    struct GfxTexInfo info;
+    info.fmt = t->fmt; info.siz = t->siz; info.palette = t->palette;
+    info.cms = t->cms; info.cmt = t->cmt; info.masks = t->masks; info.maskt = t->maskt;
+    info.shifts = t->shifts; info.shiftt = t->shiftt;
+    info.line = t->line; info.tmem = t->tmem; info.uls = t->uls; info.ult = t->ult; info.lrs = t->lrs; info.lrt = t->lrt;
+    info.tlut_mode = rdp.other_mode_h & (3U << 14);
+    info.world = !in_rect;
+    n->rhash = tex_hooks->drawn(&info, tmem, tlut);
+    n->has_hash = n->rhash != 0;
+    n->seen_world = info.world;
+    n->gen = tex_hooks->generation ? tex_hooks->generation() : 0;
+}
+
 static void import_texture(int slot) {
     static uint8_t rgba[8192 * 4]; // a tile fits in 4 KB: at most 8192 4-bit texels
     const struct TileDesc *t = &rdp.tiles[(tex_level + slot) & 7];
@@ -521,8 +578,35 @@ static void import_texture(int slot) {
         gfx_import_unsupported(slot); // a tile that was never set up
         return;
     }
-    if (gfx_texture_cache_lookup(slot, &rendering_state.textures[slot], gfx_texture_key(t, x0, y0, w, h), t->fmt, t->siz)) {
-        return;
+    bool cached = gfx_texture_cache_lookup(slot, &rendering_state.textures[slot], gfx_texture_key(t, x0, y0, w, h), t->fmt, t->siz);
+    struct TextureHashmapNode *node = rendering_state.textures[slot];
+    if (cached) {
+        if (tex_hooks == NULL || !node->has_hash) {
+            return;
+        }
+        if (!node->seen_world && !in_rect) {
+            notify_drawn(t, node); // first drawn in 3D (a texture first seen in 2D is derived from differently)
+            node->seen_world = true;
+        }
+        uint32_t g = tex_hooks->generation ? tex_hooks->generation() : 0;
+        if (g == node->gen) {
+            return;
+        }
+        node->gen = g;
+        if (apply_replacement(node)) {
+            return;
+        }
+        if (!node->replaced) {
+            return;
+        }
+        // The replacement was removed: decode the game's texture again below.
+        node->replaced = false;
+        node->rserial = 0;
+    } else if (tex_hooks != NULL && tex_hooks->drawn != NULL) {
+        notify_drawn(t, node);
+        if (node->has_hash && tex_hooks->replace != NULL && apply_replacement(node)) {
+            return;
+        }
     }
 
     if (getenv("RUSH2_F3D_FLUSH_VERTS") != NULL) {
@@ -1010,6 +1094,9 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     if (tex_width == 0) tex_width = 1;
     if (tex_height == 0) tex_height = 1;
     
+    // A replacement image is sampled with each texel of the game's texture on the middle of its block of the image, so
+    // the half-texel shift below (which is in the game's texels) doesn't apply.
+    const bool prim_replaced = rendering_state.textures[used_textures[0] ? 0 : 1] != NULL && rendering_state.textures[used_textures[0] ? 0 : 1]->replaced;
     bool z_is_from_0_to_1 = gfx_rapi->z_is_from_0_to_1();
     
     for (int i = 0; i < 3; i++) {
@@ -1025,7 +1112,7 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
         if (use_texture) {
             float u = (v_arr[i]->u * tile_shift_scale(prim_tile->shifts) - prim_tile->uls * 8) / 32.0f;
             float v = (v_arr[i]->v * tile_shift_scale(prim_tile->shiftt) - prim_tile->ult * 8) / 32.0f;
-            if ((rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT && !rect_point && !in_rect) {
+            if ((rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT && !rect_point && !in_rect && !prim_replaced) {
                 // Linear filter adds 0.5f (not for rectangles, below) to the coordinates
                 u += 0.5f;
                 v += 0.5f;
@@ -2289,6 +2376,7 @@ struct GfxRenderingAPI *gfx_get_current_rendering_api(void) {
 }
 
 void gfx_begin_frame(void) {
+    replacement_uploads = 0;
     dbg_begin_frame();
     gfx_rapi->start_frame();
 }

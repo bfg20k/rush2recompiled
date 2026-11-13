@@ -17,7 +17,18 @@
 #include "SDL2/SDL.h"
 #endif
 
+#include <atomic>
+#include <unordered_map>
+
+#define XXH_INLINE_ALL
+#include "xxHash/xxhash.h"
+#include "shared/rt64_f3d_defines.h"
+#include "common/rt64_load_types.h"
+#include "common/rt64_live_textures.h"
+#include "common/rt64_tmem_hasher.h"
+
 #include "json/json.hpp"
+#include "live_replacements.h"
 #include "librecomp/game.hpp"
 #include "recompui/recompui.h"
 #include "ultramodern/config.hpp"
@@ -32,6 +43,73 @@ extern "C" {
 namespace rush2::fast3d {
 
 namespace {
+
+// Live texture replacements (include/live_replacements.h): the Fast3D core calls these when it shows a texture. drawn()
+// gives the texture the hash RT64 would (so the recomp's texture tools key their replacements the same way) and tells
+// RT64::ActiveTextureObserver, like RT64 does for each draw; replace() hands over the image registered for the hash.
+std::atomic<uint64_t> g_frame{1};
+std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> g_texture_dims; // render thread only
+
+// The size RT64 samples a tile at (see sample_size in src/asset_catalog_walk.cpp).
+void sample_size(const RT64::LoadTile& tile, uint16_t& width, uint16_t& height) {
+    const bool clamp_s = (tile.masks == 0) || (tile.cms & G_TX_CLAMP);
+    const bool clamp_t = (tile.maskt == 0) || (tile.cmt & G_TX_CLAMP);
+    const int32_t tile_width = clamp_s ? std::max((tile.lrs - tile.uls + 4) / 4, 1) : 0xFFFF;
+    const int32_t tile_height = clamp_t ? std::max((tile.lrt - tile.ult + 4) / 4, 1) : 0xFFFF;
+    const int32_t mask_width = (tile.masks > 0) ? int32_t(1 << tile.masks) : 0xFFFF;
+    const int32_t mask_height = (tile.maskt > 0) ? int32_t(1 << tile.maskt) : 0xFFFF;
+    width = uint16_t(std::min(tile_width, mask_width));
+    height = uint16_t(std::min(tile_height, mask_height));
+}
+
+uint64_t hook_drawn(const GfxTexInfo* i, const uint8_t* tmem, const uint16_t* tlut) {
+    RT64::LoadTile tile{};
+    tile.fmt = i->fmt; tile.siz = i->siz; tile.palette = i->palette;
+    tile.cms = i->cms; tile.cmt = i->cmt; tile.masks = i->masks; tile.maskt = i->maskt;
+    tile.shifts = i->shifts; tile.shiftt = i->shiftt;
+    tile.line = i->line; tile.tmem = i->tmem;
+    tile.uls = i->uls; tile.ult = i->ult; tile.lrs = i->lrs; tile.lrt = i->lrt;
+    uint16_t width = 0, height = 0;
+    sample_size(tile, width, height);
+    // RGBA32 keeps its texels unsplit in Fast3D's TMEM (not the hardware's two banks), and a tile with no line has
+    // nothing loaded: neither can be hashed the way RT64 does.
+    if ((tile.fmt == G_IM_FMT_RGBA && tile.siz == G_IM_SIZ_32b) || tile.line == 0 || width == 0 || height == 0 ||
+        width > 1024 || height > 1024) {
+        return 0;
+    }
+    uint8_t canonical[4096];
+    std::memcpy(canonical, tmem, sizeof(canonical));
+    if (tile.fmt == G_IM_FMT_CI) {
+        // A TLUT load leaves each palette entry four times over in its 64-bit word at 0x800 + 8 * index.
+        for (int e = 0; e < 256; e++) {
+            for (int k = 0; k < 4; k++) {
+                canonical[0x800 + e * 8 + k * 2] = uint8_t(tlut[e] >> 8);
+                canonical[0x800 + e * 8 + k * 2 + 1] = uint8_t(tlut[e]);
+            }
+        }
+    }
+    if (RT64::TMEMHasher::requiresRawTMEM(tile, width, height, i->tlut_mode)) return 0;
+    const uint64_t hash = RT64::TMEMHasher::hash(canonical, tile, width, height, i->tlut_mode, RT64::TMEMHasher::CurrentHashVersion);
+    g_texture_dims[hash] = { width, height };
+    if (RT64::TextureObserver* observer = RT64::ActiveTextureObserver.load()) {
+        observer->textureDrawn(hash, canonical, tile, width, height, i->tlut_mode, i->world, g_frame.load(), 0);
+    }
+    return hash;
+}
+
+int hook_replace(uint64_t hash, uint32_t* serial, GfxUploadFn upload, void* ctx) {
+    static std::vector<uint8_t> rgba;
+    uint32_t dw = 0, dh = 0, w = 0, h = 0;
+    auto d = g_texture_dims.find(hash);
+    if (d != g_texture_dims.end()) { dw = d->second.first; dh = d->second.second; }
+    const int r = rush2::live::find(hash, dw, dh, serial, rgba, w, h);
+    if (r == 2) upload(rgba.data(), w, h, ctx);
+    return r;
+}
+
+uint32_t hook_generation() { return rush2::live::generation(); }
+
+const GfxTextureHooks g_texture_hooks = { hook_drawn, hook_replace, hook_generation };
 
 // recompui::ExternalRenderer takes plain function pointers, so the UI renderer is reached through this.
 ui_gl::Renderer* g_ui = nullptr;
@@ -85,6 +163,8 @@ public:
         }
 
         gfx_init_embedded(&gfx_opengl_api, rdram);
+        rush2::live::use_fast3d(true);
+        gfx_set_texture_hooks(&g_texture_hooks);
         refresh_dimensions();
 
         // The menus and launcher: RecompFrontend's UI normally runs from RT64's render hooks, so with another renderer
@@ -147,6 +227,7 @@ public:
     }
 
     void update_screen() override {
+        g_frame++;
         if (gl == nullptr || !frame_open) {
             return;
         }

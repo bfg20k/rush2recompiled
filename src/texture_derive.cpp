@@ -16,6 +16,7 @@
 #include <unordered_set>
 
 #include "common/rt64_live_textures.h"
+#include "live_replacements.h"
 #include "json/json.hpp"
 #include "librecomp/mods.hpp"
 #define XXH_INLINE_ALL
@@ -853,7 +854,7 @@ namespace {
             // the image is sampled at the same place; RT64's usual half shift would sample half an image texel off,
             // pulling a wrapping texture's far edge into the seam where a body's mirrored halves meet (the Bruiser's
             // arcade liveries, docs/car_mods.md#image-alignment).
-            RT64::addLiveReplacement(d.hash, content, rush2::upscale::make_dds(out), {}, true);
+            rush2::live::add(d.hash, content, rush2::upscale::make_dds(out), {}, true);
             set_outcome(d.hash, Outcome::Derived);
             std::unique_lock lock(mutex);
             owned.insert(d.hash);
@@ -958,7 +959,7 @@ namespace {
                     }
                     if (do_reload) {
                         untraced.clear();
-                        for (uint64_t hash : owned) RT64::removeLiveReplacement(hash);
+                        for (uint64_t hash : owned) rush2::live::remove(hash);
                         owned.clear();
                         queue.clear();
                         for (size_t i = 0; i < all.size(); i++) queue.push_back(i);
@@ -1093,14 +1094,14 @@ namespace {
                         // strips' edges.
                         uint64_t content = b.key ^ 0xBA5E0000BA5Eull ^ (pack_generation * 0x9E3779B97F4A7C15ull);
                         std::vector<uint8_t> bytes;
-                        if (!RT64::hasLiveReplacementContent(content)) bytes = rush2::upscale::make_dds(up);
+                        if (!rush2::live::has_content(content)) bytes = rush2::upscale::make_dds(up);
                         RT64::ReplacementRegion region;
                         if (d.image.height != b.height) {
                             region.y = uint32_t(t.dy);
                             region.sourceWidth = b.width;
                             region.sourceHeight = b.height;
                         }
-                        RT64::addLiveReplacement(d.hash, content, bytes, region);
+                        rush2::live::add(d.hash, content, bytes, region);
                         set_outcome(d.hash, Outcome::Derived);
                         std::unique_lock lock(mutex);
                         owned.insert(d.hash);
@@ -1133,7 +1134,7 @@ namespace {
                 const clock::time_point worked = clock::now();
                 for (Job& job : jobs) {
                     uint64_t content = job.d.hash ^ 0xDE51BEDull ^ (pack_generation * 0x9E3779B97F4A7C15ull);
-                    RT64::addLiveReplacement(job.d.hash, content, std::move(job.dds));
+                    rush2::live::add(job.d.hash, content, std::move(job.dds));
                     set_outcome(job.d.hash, Outcome::Derived);
                     std::unique_lock lock(mutex);
                     owned.insert(job.d.hash);

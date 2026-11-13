@@ -12,6 +12,28 @@
 
 typedef void (*ReadPixelsFn)(int, int, int, int, unsigned, unsigned, void *);
 
+// RUSH2_F3D_TEST_REPLACE=1: replaces every texture drawn in 3D with a 64x64 checker, to exercise the texture hooks
+// (gfx_set_texture_hooks) the recomp uses for live replacements. The hash is just the tile's fmt/siz/tmem.
+static uint64_t test_drawn(const struct GfxTexInfo *i, const uint8_t *tmem, const uint16_t *tlut) {
+    (void)tmem; (void)tlut;
+    return i->world ? 1 + ((uint64_t)i->fmt << 8 | i->siz << 4 | i->tmem << 16) : 0;
+}
+static int test_replace(uint64_t hash, uint32_t *serial, GfxUploadFn up, void *ctx) {
+    (void)hash;
+    if (*serial == 1) return 1;
+    static uint8_t px[64 * 64 * 4];
+    for (int y = 0; y < 64; y++) for (int x = 0; x < 64; x++) {
+        uint8_t *p = px + 4 * (y * 64 + x);
+        int c = ((x >> 3) ^ (y >> 3)) & 1;
+        p[0] = c ? 255 : 40; p[1] = c ? 0 : 200; p[2] = 255; p[3] = 255;
+    }
+    up(px, 64, 64, ctx);
+    *serial = 1;
+    return 2;
+}
+static uint32_t test_generation(void) { return 1; }
+static const struct GfxTextureHooks test_hooks = { test_drawn, test_replace, test_generation };
+
 int main(int argc, char **argv) {
     if (argc < 3) {
         fprintf(stderr, "usage: %s frame.bin out.ppm [glsl120|glsl330]\n", argv[0]);
@@ -43,6 +65,7 @@ int main(int argc, char **argv) {
     ReadPixelsFn read_pixels = (ReadPixelsFn)SDL_GL_GetProcAddress("glReadPixels");
     gfx_init_embedded(&gfx_opengl_api, rdram);
     gfx_set_dimensions(w, h);
+    if (getenv("RUSH2_F3D_TEST_REPLACE")) gfx_set_texture_hooks(&test_hooks);
     if (getenv("RUSH2_F3D_HUD_SHARP")) gfx_set_hud_filtering(false); // HUD Filtering = Sharp
     gfx_begin_frame();
 

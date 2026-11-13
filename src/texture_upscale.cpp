@@ -54,6 +54,7 @@
 #include <unordered_set>
 
 #include "common/rt64_live_textures.h"
+#include "live_replacements.h"
 #include "librecomp/config.hpp"
 #include "librecomp/mods.hpp"
 #include "recompui/config.h"
@@ -1354,14 +1355,14 @@ namespace {
                 }
                 uint64_t content = content_key(image) ^ 0xE8AC71A6Eull;
                 std::vector<uint8_t> bytes;
-                if (!RT64::hasLiveReplacementContent(content)) {
+                if (!rush2::live::has_content(content)) {
                     bytes = make_dds(image);
                 }
                 RT64::ReplacementRegion region;
                 region.y = strip.row;
                 region.sourceWidth = image.width;
                 region.sourceHeight = image.height;
-                RT64::addLiveReplacement(hash, content, bytes, region);
+                rush2::live::add(hash, content, bytes, region);
             }
         }
 
@@ -1522,11 +1523,11 @@ namespace {
                 }
 
                 if (clear) {
-                    RT64::clearLiveReplacements();
+                    rush2::live::clear();
                     rush2::derive::packs_changed(); // That took the derived replacements off: they are made again.
                 }
                 for (uint64_t hash : to_remove) {
-                    RT64::removeLiveReplacement(hash);
+                    rush2::live::remove(hash);
                 }
                 {
                     std::unique_lock lock(mutex);
@@ -1638,7 +1639,7 @@ namespace {
             }
             uint64_t content = live_key(key, for_mode);
             std::vector<uint8_t> bytes;
-            if (!RT64::hasLiveReplacementContent(content)) {
+            if (!rush2::live::has_content(content)) {
                 bytes = read_file(cache_path(for_mode, key));
                 if (bytes.empty()) {
                     return;
@@ -1646,7 +1647,7 @@ namespace {
             }
             for (uint64_t hash : hashes) {
                 if (rush2::derive::owns(hash)) continue; // Made from an installed pack's upscale, which wins.
-                RT64::addLiveReplacement(hash, content, bytes);
+                rush2::live::add(hash, content, bytes);
             }
         }
 

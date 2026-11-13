@@ -84,3 +84,28 @@ The big digits are a 2-cycle crossfade whose TEXEL1 is tile 1, the same CI8 data
 wide; limiting it to the window repeated half a row and the mask alpha filled the digit cells with translucent boxes.
 `tile_dims` now widens a wrap tile with a magnifying S shift to its mask. Test frame: user frame 2400 (flush 40-42).
 `RUSH2_F3D_DUMP_SLOT=0|1` picks which texture slot `RUSH2_F3D_DUMP_TEX` dumps.
+
+## Live texture replacements (mod car textures, derived and upscaled textures)
+
+RT64 swaps textures at run time (`RT64::addLiveReplacement`, `rush2::derive`, `texture_upscale.cpp`): mod cars draw tiny
+stand-in textures (CI8 in a Rush 2 palette) and the recomp supplies the mod's full-size image. Fast3D has no such layer, so
+before this bridge mod cars looked low resolution under it.
+
+- `include/live_replacements.h`/`src/live_replacements.cpp` (`rush2::live`): every `addLiveReplacement` call site goes
+  through it. Under RT64 it forwards; under Fast3D (`use_fast3d(true)`, set by `Fast3DContext`) it keeps decoded RGBA
+  images keyed by RT64 texture hash, with a generation counter and per-entry serial.
+- `lib/fast3d/gfx_pc.h` `GfxTextureHooks` (`drawn`, `replace`, `generation`), installed by `src/fast3d_context.cpp`.
+  `drawn` builds the canonical TMEM (palette words from `tlut` at 0x800 + 8 * index, four copies of each entry), hashes it with
+  `RT64::TMEMHasher` and calls `RT64::ActiveTextureObserver->textureDrawn`, so the upscaler/derive code sees the same
+  hashes it sees under RT64. RGBA32 and tiles with no line are not hashed (0 = never replaced).
+- `import_texture` calls `drawn` once per cached texture (again the first time it is drawn in 3D), then `replace`. The
+  texture cache node remembers the hash and the serial shown; when the generation changes a node re-checks, so a
+  replacement the derive worker finishes later swaps in, and a removed one decodes the game's texture again.
+- A replaced texture skips the half-texel shift of linear filtering (RT64's "centered" replacements), and at most two
+  replacement uploads happen per frame so a burst spreads over a few frames.
+- Strip regions (`ReplacementRegion`) are cut from the source image at lookup time using the sampled size recorded by `drawn`.
+- Offline check: `RUSH2_F3D_TEST_REPLACE=1 tools/f3d_replay frame.bin out.ppm` replaces every 3D texture with a checker
+  (only two per frame because of the upload budget). The real replacements exist only in game, so the final check is
+  SELECT CAR with a mod car (Magnum): its paint should be sharp.
+- Not verified offline: the hashes against RT64's (the RT64 sources are not in this tree); if replacements never show,
+  compare a `drawn` hash with the hash RT64 logs for the same texture.

@@ -198,6 +198,7 @@ target_sources(Rush2Recompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/texture_upscale_images.cpp
     ${CMAKE_SOURCE_DIR}/src/texture_census.cpp
     ${CMAKE_SOURCE_DIR}/src/texture_derive.cpp
+    ${CMAKE_SOURCE_DIR}/src/live_replacements.cpp
     ${CMAKE_SOURCE_DIR}/src/body_sheet.cpp
     ${CMAKE_SOURCE_DIR}/src/car_mods.cpp
     ${CMAKE_SOURCE_DIR}/src/car_probes.cpp
