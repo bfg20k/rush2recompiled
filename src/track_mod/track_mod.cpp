@@ -36,6 +36,7 @@
 #include "rush2049_dc.h"
 #include "rush2049_rom.h"
 #include "texture_upscale.h"
+#include "live_replacements.h"
 #include "track2049.h"
 #include "track_cache.h"
 #include "track_mod.h"
@@ -672,6 +673,7 @@ void rush2::track_mod::publish_textures() {
         return;
     }
     printf("[trackmod] %zu custom track textures drawn full size\n", pack.size());
+    if (rush2::live::set_pack("tracks", pack.empty() ? std::filesystem::path() : texture_root())) return; // Fast3D
     recompui::renderer::set_generated_texture_pack("tracks", pack.empty() ? std::filesystem::path() : texture_root());
 }
 

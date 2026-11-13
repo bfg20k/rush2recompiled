@@ -6,6 +6,8 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
+#include <string>
 #include <vector>
 
 #include "common/rt64_live_textures.h"
@@ -21,6 +23,12 @@ bool add(uint64_t hash, uint64_t content, std::vector<uint8_t> file, RT64::Repla
 bool has_content(uint64_t content);
 void remove(uint64_t hash);
 void clear();
+
+// A generated texture pack (a folder with an rt64.json: the custom tracks' full-size textures, the Dreamcast pack),
+// which RT64 reads itself (recompui::renderer::set_generated_texture_pack). Under Fast3D this replaces it: the pack's
+// images are loaded and decoded on a worker thread the first time a texture with their hash is drawn, and show a moment
+// later. An empty path takes the pack `id` away. Returns false under RT64 (the caller hands the pack to RT64).
+bool set_pack(const std::string& id, const std::filesystem::path& folder);
 
 // Fast3D side. generation() changes whenever a replacement is added or removed. find() gives the image for `hash`: for a
 // region (a strip of a bigger image) the strip's part of it, cut for a texture of width x height texels. Returns 0 if

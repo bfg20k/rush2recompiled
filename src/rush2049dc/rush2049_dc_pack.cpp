@@ -34,6 +34,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "live_replacements.h"
 #include "recompui/recompui.h"
 #include "recompui/renderer.h"
 #include "librecomp/game.hpp"
@@ -104,11 +105,11 @@ namespace {
     void set_renderer_pack(bool on) {
         if (on) {
             pack_set = true;
-            recompui::renderer::set_generated_texture_pack(pack_dir());
+            if (!rush2::live::set_pack("dc", pack_dir())) recompui::renderer::set_generated_texture_pack(pack_dir());
         }
         else if (pack_set) {
             pack_set = false;
-            recompui::renderer::set_generated_texture_pack({});
+            if (!rush2::live::set_pack("dc", {})) recompui::renderer::set_generated_texture_pack({});
         }
     }
 

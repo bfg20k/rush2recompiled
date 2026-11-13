@@ -109,3 +109,11 @@ before this bridge mod cars looked low resolution under it.
   SELECT CAR with a mod car (Magnum): its paint should be sharp.
 - Not verified offline: the hashes against RT64's (the RT64 sources are not in this tree); if replacements never show,
   compare a `drawn` hash with the hash RT64 logs for the same texture.
+
+### Generated texture packs (custom tracks, Dreamcast pack)
+
+Custom track textures (`track_mod.cpp` publish_textures) and the Dreamcast pack (`rush2049_dc_pack.cpp`) reach RT64 as
+generated packs (`set_generated_texture_pack`: a folder with an `rt64.json` of RT64 hash -> DDS). Under Fast3D the same
+call sites use `rush2::live::set_pack(id, folder)` instead: it parses `rt64.json`, and the first time a texture with a pack
+hash is drawn a worker thread reads and decodes the image; the generation then changes and the texture swaps in (so a
+track's textures sharpen a moment after they first appear, never stalling the frame). Same hash caveat as above.

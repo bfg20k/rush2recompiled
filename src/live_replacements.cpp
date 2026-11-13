@@ -6,9 +6,14 @@
 #include <atomic>
 #include <cstring>
 #include <memory>
+#include <condition_variable>
+#include <deque>
+#include <map>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 
+#include "json/json.hpp"
 #include "texture_upscale.h"
 
 namespace rush2::live {
@@ -28,6 +33,45 @@ namespace {
     std::unordered_map<uint64_t, Entry> g_entries;
     std::unordered_map<uint64_t, std::shared_ptr<const Image>> g_contents;
     uint32_t g_next_serial = 1;
+
+    // Generated packs (set_pack): image files by hash, read on demand by the loader thread.
+    struct PackFile {
+        std::filesystem::path path;
+        uint64_t content = 0;
+        enum { Idle, Queued, Done } state = Idle;
+    };
+    std::map<std::string, std::unordered_map<uint64_t, PackFile>> g_packs; // by pack id
+    std::deque<std::pair<uint64_t, std::filesystem::path>> g_queue;       // hash, file
+    std::condition_variable g_queue_changed;
+    bool g_loader_started = false;
+
+    void loader_loop() {
+        while (true) {
+            std::pair<uint64_t, std::filesystem::path> job;
+            {
+                std::unique_lock lock(g_mutex);
+                g_queue_changed.wait(lock, [] { return !g_queue.empty(); });
+                job = std::move(g_queue.front());
+                g_queue.pop_front();
+            }
+            auto image = std::make_shared<Image>();
+            std::vector<uint8_t> bytes = rush2::upscale::read_file(job.second);
+            bool ok = !bytes.empty() && (rush2::upscale::read_dds(bytes, *image) || rush2::upscale::decode_image(bytes, *image)) &&
+                      !image->empty() && image->rgba.size() >= size_t(image->width) * image->height * 4;
+            std::lock_guard lock(g_mutex);
+            for (auto& [id, files] : g_packs) {
+                auto f = files.find(job.first);
+                if (f != files.end()) f->second.state = PackFile::Done;
+            }
+            if (ok) {
+                Entry& e = g_entries[job.first];
+                e.image = std::move(image);
+                e.region = {};
+                e.serial = g_next_serial++;
+                g_generation++;
+            }
+        }
+    }
 }
 
 void use_fast3d(bool on) { g_fast3d = on; }
@@ -82,8 +126,56 @@ void clear() {
         std::lock_guard lock(g_mutex);
         g_entries.clear();
         g_contents.clear();
+        for (auto& [id, files] : g_packs) {
+            for (auto& [hash, f] : files) {
+                if (f.state == PackFile::Done) f.state = PackFile::Idle; // loaded again when drawn
+            }
+        }
     }
     g_generation++;
+}
+
+bool set_pack(const std::string& id, const std::filesystem::path& folder) {
+    if (!g_fast3d) return false;
+    std::unordered_map<uint64_t, PackFile> files;
+    if (!folder.empty()) {
+        std::vector<uint8_t> bytes = rush2::upscale::read_file(folder / "rt64.json");
+        nlohmann::json db = nlohmann::json::parse(bytes.begin(), bytes.end(), nullptr, false);
+        if (db.is_object() && db.contains("textures") && db["textures"].is_array()) {
+            for (const auto& t : db["textures"]) {
+                uint64_t hash = 0;
+                if (!t.is_object() || !t.contains("path") || !t.contains("hashes") || !t["hashes"].contains("rt64") ||
+                    !rush2::upscale::parse_key_name(t["hashes"]["rt64"].get<std::string>(), hash)) {
+                    continue;
+                }
+                std::filesystem::path file = folder / std::filesystem::u8path(t["path"].get<std::string>());
+                if (!std::filesystem::exists(file)) {
+                    std::filesystem::path dds = file;
+                    dds += ".dds";
+                    std::filesystem::path png = file;
+                    png += ".png";
+                    file = std::filesystem::exists(dds) ? dds : png;
+                }
+                PackFile f;
+                f.path = file;
+                files[hash] = std::move(f);
+            }
+        }
+    }
+    {
+        std::lock_guard lock(g_mutex);
+        // Images the old pack had loaded go with it.
+        for (const auto& [hash, f] : g_packs[id]) {
+            if (f.state == PackFile::Done) g_entries.erase(hash);
+        }
+        if (files.empty()) g_packs.erase(id); else g_packs[id] = std::move(files);
+        if (!g_loader_started) {
+            g_loader_started = true;
+            std::thread(loader_loop).detach();
+        }
+    }
+    g_generation++;
+    return true;
 }
 
 uint32_t generation() { return g_generation; }
@@ -95,7 +187,18 @@ int find(uint64_t hash, uint32_t width, uint32_t height, uint32_t* serial, std::
     {
         std::lock_guard lock(g_mutex);
         auto it = g_entries.find(hash);
-        if (it == g_entries.end()) return 0;
+        if (it == g_entries.end()) {
+            // In a generated pack: load it in the background; it shows once it's there (generation changes).
+            for (auto& [id, files] : g_packs) {
+                auto f = files.find(hash);
+                if (f == files.end() || f->second.state != PackFile::Idle) continue;
+                f->second.state = PackFile::Queued;
+                g_queue.emplace_back(hash, f->second.path);
+                g_queue_changed.notify_one();
+                break;
+            }
+            return 0;
+        }
         if (*serial == it->second.serial) return 1;
         image = it->second.image;
         region = it->second.region;
