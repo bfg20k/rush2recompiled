@@ -4503,6 +4503,14 @@ extern "C" void rush2_car49_setup_desc(uint8_t* rdram, recomp_context* ctx) {
     uint32_t car = (uint32_t)ctx->r18;
     int type = MEM_BU(0, (int32_t)(car + 0x7EA));
     int slot = int((car - physics_cars) / physics_car_size);
+    if (std::getenv("RUSH2_BARS_TRACE") != nullptr) {
+        // The descriptor ($fp) the game just loaded for the car, against the table it should come from (see
+        // TestCar::init, the bar ranges' build pass).
+        uint32_t index = MEM_BU(0, (int32_t)(t_desc_index + type));
+        fprintf(stderr, "[bars] setup_desc: car %08X type %d slot %d, $fp %016llX, table[%u] = %08X\n", car, type, slot,
+                (unsigned long long)ctx->r30, index, (uint32_t)MEM_W(0, (int32_t)(desc_ptrs + index * 4)));
+        fflush(stderr);
+    }
     if (slot < 0 || slot >= 8) {
         return;
     }
