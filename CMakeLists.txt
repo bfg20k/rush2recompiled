@@ -210,6 +210,7 @@ target_sources(Rush2Recompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/arcade2049/arcade_data.cpp
     ${CMAKE_SOURCE_DIR}/src/arcade2049/arcade_glb.cpp
     ${CMAKE_SOURCE_DIR}/src/arcade2049/arcade_track.cpp
+    ${CMAKE_SOURCE_DIR}/src/arcade2049/arcade_seams.cpp
     ${CMAKE_SOURCE_DIR}/src/arcade2049/arcade_cars.cpp
     ${CMAKE_SOURCE_DIR}/src/arcade2049/arcade_install.cpp
     ${CMAKE_SOURCE_DIR}/src/arcade2049/arcade_checkpoints.cpp
@@ -245,6 +246,7 @@ target_sources(Rush2Recompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/circuit.cpp
     ${CMAKE_SOURCE_DIR}/src/explosive.cpp
     ${CMAKE_SOURCE_DIR}/src/time_sprint.cpp
+    ${CMAKE_SOURCE_DIR}/src/checkpoint_time.cpp
     ${CMAKE_SOURCE_DIR}/src/npc_cars.cpp
     ${CMAKE_SOURCE_DIR}/src/paint_colors.cpp
     ${CMAKE_SOURCE_DIR}/src/game_fixes.cpp
@@ -309,6 +311,7 @@ target_sources(Rush2Recompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/track_cache.cpp
     ${CMAKE_SOURCE_DIR}/src/track_traction.cpp
     ${CMAKE_SOURCE_DIR}/src/car_lights.cpp
+    ${CMAKE_SOURCE_DIR}/src/snowfall.cpp
     ${CMAKE_SOURCE_DIR}/src/race_time_model.cpp
     ${CMAKE_SOURCE_DIR}/src/prewarm.cpp
     ${CMAKE_SOURCE_DIR}/src/texture_prewarm.cpp
@@ -335,6 +338,7 @@ target_sources(Rush2Recompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/rush2049/car2049.cpp
     ${CMAKE_SOURCE_DIR}/src/rush2049/audio2049.cpp
     ${CMAKE_SOURCE_DIR}/src/rush2049dc/audio2049_dc.cpp
+    ${CMAKE_SOURCE_DIR}/src/rush2049dc/dc_translucent.cpp
     ${CMAKE_SOURCE_DIR}/src/rush1/car1_decals.cpp
     ${CMAKE_SOURCE_DIR}/src/rush1/car1_stripes.cpp
     ${CMAKE_SOURCE_DIR}/src/rush2049/wings.cpp

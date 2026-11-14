@@ -150,6 +150,44 @@ namespace {
         bool empty() const { return order.empty(); }
     };
 
+    // One triangle of a primitive: its corners' attributes (colors empty when the primitive has none).
+    struct SkyTri {
+        int material = 0;
+        std::array<V3, 3> v, n;
+        std::array<V2, 3> uv;
+        std::array<std::array<double, 4>, 3> col{};
+        bool has_col = false;
+    };
+
+    // The parts of t at or above height y (glTF space), as 0-2 triangles with their attributes cut along the edges.
+    std::vector<SkyTri> keep_above(const SkyTri& t, double y) {
+        struct C { V3 v, n; V2 uv; std::array<double, 4> col; };
+        std::vector<C> in, out;
+        for (int k = 0; k < 3; k++) in.push_back({ t.v[k], t.n[k], t.uv[k], t.col[k] });
+        for (size_t i = 0; i < in.size(); i++) {
+            const C& a = in[i];
+            const C& b = in[(i + 1) % in.size()];
+            bool ka = a.v[1] >= y, kb = b.v[1] >= y;
+            if (ka) out.push_back(a);
+            if (ka != kb) {
+                double f = (y - a.v[1]) / (b.v[1] - a.v[1]);
+                C c;
+                for (int j = 0; j < 3; j++) { c.v[j] = a.v[j] + (b.v[j] - a.v[j]) * f; c.n[j] = a.n[j] + (b.n[j] - a.n[j]) * f; }
+                for (int j = 0; j < 2; j++) c.uv[j] = a.uv[j] + (b.uv[j] - a.uv[j]) * f;
+                for (int j = 0; j < 4; j++) c.col[j] = a.col[j] + (b.col[j] - a.col[j]) * f;
+                out.push_back(c);
+            }
+        }
+        std::vector<SkyTri> res;
+        for (size_t i = 1; i + 1 < out.size(); i++) {
+            SkyTri r = t;
+            const C* c[3] = { &out[0], &out[i], &out[i + 1] };
+            for (int k = 0; k < 3; k++) { r.v[k] = c[k]->v; r.n[k] = c[k]->n; r.uv[k] = c[k]->uv; r.col[k] = c[k]->col; }
+            res.push_back(r);
+        }
+        return res;
+    }
+
     // ------------------------------------------------------------------------------------------ 2D geometry
     using namespace Clipper2Lib;
     constexpr double fine = 4096.0;            // Clipper units per foot for the spline road's cuts
@@ -1200,19 +1238,58 @@ static bool build_one(const ArcadeGame& game, const std::filesystem::path& data_
         V3 pos;
         std::vector<std::string> script;
         bool card = false;      // a worlds.rom card the arcade turns to the camera (name FF_)
+        const char* prop = nullptr;     // a breakable's PROP_ kind (breakable_kind)
     };
     std::vector<Instance> instances;
-    size_t unnamed = 0;
+    size_t unnamed = 0, key_markers = 0;
+    // Rush The Rock draws N64 SF Rush's breakables (docs/sfrush_arcade.md#breakables) as plain scenery: its cone, parking
+    // meter and traffic light models and its single tree cards, which stand where the N64 courses place theirs
+    // (tools/arcade_props.py lists the matches). They become props, Rush 2's own breakables as on the N64 courses
+    // (src/rush1/track1_convert.cpp): KNOCK cones, METER meters, TIP traffic lights (the N64's CURVEHIT class) and TREE
+    // trees. Told apart by their texture, size and triangle count (a tree: one card object in a tree texture the N64
+    // tree spots carry, not a clump or a row).
+    auto breakable_kind = [&](const Object* o, const M3& M, const V3& pos) -> const char* {
+        const Lod& lod = o->lod0;
+        if (!rock || lod.tris.empty() || lod.verts.empty()) return nullptr;
+        std::set<std::string> tex;
+        for (const auto& tr : lod.tris) tex.insert(tr[3] < t.textures.size() ? upper(t.textures[tr[3]].name) : "");
+        V3 lo{ 1e30, 1e30, 1e30 }, hi{ -1e30, -1e30, -1e30 };
+        for (const Vertex& v : lod.verts) {
+            V3 p = mul(v.pos, M) + pos;
+            for (int k = 0; k < 3; k++) lo[k] = std::min(lo[k], p[k]), hi[k] = std::max(hi[k], p[k]);
+        }
+        double height = hi[1] - lo[1], width = std::max(hi[0] - lo[0], hi[2] - lo[2]);
+        if (tex.size() != 1) return nullptr;
+        const std::string& name = *tex.begin();
+        if (name == "RED" && lod.tris.size() == 19 && height < 6) return "KNOCK";
+        if (name == "PARKMETER" && height < 8) return "METER";
+        if (name == "SIGNAL3" && height < 25 && width < 6) return "TIP";
+        static const std::set<std::string> trees = { "T1_TREE1", "T1_TREE4", "T1_TREE5", "T1_TREE9A", "DECID2", "DECID2A",
+                                                     "JUNIMED4" };
+        if (trees.count(name) && lod.tris.size() <= 8 && height >= 8 && height <= 70 && width <= 60) return "TREE";
+        return nullptr;
+    };
     for (const WorldEntry& w : worlds) {
         // The Rock's TRACK5-7 have placements with no name (111, 100 and 65): nothing to place.
         if (w.name.empty()) { unnamed++; continue; }
         const Object* o = t.object_named(w.name);
         if (!o) { report.push_back("worlds.rom: " + w.name + " names no object, left out"); continue; }
+        // Rush The Rock's own key markers: little cubes drawn only in its ATARI5 logo (TRACK5-7: 7, 8 and 8 of them,
+        // at the spots the N64 keys are), left out as the 2049 arcade's coin pickups are; the SF Rush keys are placed
+        // there instead (arcade_collectibles.cpp). ATARI5 also shows on signs (TRACK1, 3), which have other textures.
+        if (rock && !o->lod0.tris.empty() &&
+            std::all_of(o->lod0.tris.begin(), o->lod0.tris.end(), [&](const std::array<uint16_t, 4>& tr) {
+                return tr[3] < t.textures.size() && starts_with(upper(t.textures[tr[3]].name), "ATARI");
+            })) {
+            key_markers++;
+            continue;
+        }
         // The arcade's worlds loader (ProjectR 0x1402D69EE) gives a placement named FF_ the flag dobs' `frontface`
         // sets (0x2000000): mostly trees, plus Presidio's bridge glows and Mission's glare sprites.
-        instances.push_back({ o, w.m, w.pos, {}, starts_with(upper(w.name), "FF_") });
+        instances.push_back({ o, w.m, w.pos, {}, starts_with(upper(w.name), "FF_"), breakable_kind(o, w.m, w.pos) });
     }
     if (unnamed) report.push_back("worlds.rom: " + std::to_string(unnamed) + " placements with no name, left out");
+    if (key_markers) report.push_back("worlds.rom: " + std::to_string(key_markers) + " key markers (ATARI5 cubes), left out");
     for (const DobsEntry& d : dobs) {
         const Object* o = t.object_named(d.name);
         if (!o) { report.push_back("dobs.rom: " + d.name + " names no object, left out"); continue; }
@@ -1270,7 +1347,41 @@ static bool build_one(const ArcadeGame& game, const std::filesystem::path& data_
     }
 
     PrimSet scenery, sky;
+    // Rush The Rock's finish banner: the placed object whose CHKPOINT faces are nearest its lap line ('F' in
+    // rock_gates, 19-203 ft from it on the seven tracks; no object is drawn in its FINISH image, which the arcade puts
+    // on the banner for the last lap). Its CHKPOINT faces become the custom track's FINISH_BANNER in a CHKPNT
+    // material, with FINISH's image as the FINISH material (docs/custom_tracks.md#finish-banner), as the PlayStation
+    // tracks' banners are made (src/sfrush_ps1/ps1_track.cpp).
+    const Instance* banner = nullptr;
+    int chk_texture = -1, finish_texture = -1;
+    PrimSet banner_prims;
+    if (rock) {
+        for (size_t i = 0; i < t.textures.size(); i++) {
+            if (t.textures[i].name == "CHKPOINT") chk_texture = int(i);
+            if (t.textures[i].name == "FINISH") finish_texture = int(i);
+        }
+        const RockGate* lap_line = nullptr;
+        for (const RockGate& rg : rock_gates) {
+            if (std::strcmp(rg.folder, folder) == 0 && rg.role == 'F') lap_line = &rg;
+        }
+        double best = 300.0;
+        for (const Instance& in : instances) {
+            if (!lap_line || chk_texture < 0 || finish_texture < 0) break;
+            V3 sum{};
+            size_t count = 0;
+            for (const auto& tr : in.o->lod0.tris) {
+                if (tr[3] != chk_texture) continue;
+                for (int c = 0; c < 3; c++) {
+                    if (tr[c] < in.o->lod0.verts.size()) sum = sum + mul(in.o->lod0.verts[tr[c]].pos, in.M) + in.pos, count++;
+                }
+            }
+            if (!count) continue;
+            double d = norm(sum * (1.0 / count) - V3{ lap_line->x, lap_line->y, lap_line->z });
+            if (d < best) best = d, banner = &in;
+        }
+    }
     int billboards = 0, knocks = 0;
+    std::map<std::string, int> breakables;  // PROP_ kind -> count (breakable_kind)
     // A mesh in glTF space (default material) for collision or a trigger box.
     struct ColMesh {
         std::vector<V3> verts, normals;
@@ -1421,6 +1532,26 @@ static bool build_one(const ArcadeGame& game, const std::filesystem::path& data_
         const Lod& lod = in.o->lod0;
         std::vector<V3> local;
         for (const Vertex& v : lod.verts) local.push_back(mul(v.pos, in.M));
+        if (in.prop) {
+            // A breakable (breakable_kind): its origin at its foot (the middle of its base), which Rush 2 tips and
+            // hits it about.
+            V3 lo{ 1e30, 1e30, 1e30 }, hi{ -1e30, -1e30, -1e30 };
+            for (const V3& p : local) for (int k = 0; k < 3; k++) lo[k] = std::min(lo[k], p[k]), hi[k] = std::max(hi[k], p[k]);
+            V3 foot{ (lo[0] + hi[0]) / 2, lo[1], (lo[2] + hi[2]) / 2 };
+            std::vector<V3> rel;
+            for (const V3& p : local) rel.push_back(p - foot);
+            PrimSet prims;
+            add_tris(prims, lod, rel, 0.0);
+            char suffix[16];
+            snprintf(suffix, sizeof(suffix), ".%03d", billboards);
+            Glb::Trs trs;
+            trs.translation = to_gltf(in.pos + foot);
+            g.textured_mesh(std::string("PROP_") + in.prop + "_" + in.o->name + suffix, prims.list(), trs);
+            billboards++;
+            breakables[in.prop]++;
+            tri_count += lod.tris.size();
+            continue;
+        }
         if (words.count("coin") || starts_with(upper(in.o->name), "GOLDCOIN")) {
             // The arcade's coin pickups: left out (mods have no collectibles; Rush 2049's coins are its hidden
             // collectibles, a different thing).
@@ -1674,10 +1805,51 @@ static bool build_one(const ArcadeGame& game, const std::filesystem::path& data_
             still.insert(in.o->name + (is_sky ? " (sky: it stays still)" : " (a flipbook with no event: its first frame)"));
         }
         if (collision && !is_sky) object_collision(lod, in.M, in.pos, object_road, object_wall);
+        if (&in == banner && !is_sky) {
+            Lod chk = lod, rest = lod;
+            chk.tris.clear();
+            rest.tris.clear();
+            for (const auto& tr : lod.tris) (tr[3] == chk_texture ? chk : rest).tris.push_back(tr);
+            tri_count += add_tris(scenery, rest, V, max_edge);
+            tri_count += add_tris(banner_prims, chk, V, max_edge);
+            continue;
+        }
         size_t n = add_tris(is_sky ? sky : scenery, lod, V, is_sky ? 0.0 : max_edge);
         tri_count += is_sky ? 0 : n;
     }
-    g.textured_mesh("TRACK", scenery.list());
+    if (rock) {
+        // The Rock's models leave cracks (curbs with no face under their edge, T-junctions, seams of up to 0.2 ft):
+        // closed here (docs/sfrush_arcade.md#cracks-and-curbs). Rush 2049's arcade tracks are left as they are.
+        auto opaque = [&](int m) { return !g.js["materials"][size_t(m)].contains("alphaMode"); };
+        g.textured_mesh("TRACK", close_scenery_seams(scenery.list(), opaque, report));
+    }
+    else g.textured_mesh("TRACK", scenery.list());
+    if (!banner_prims.empty()) {
+        // CHKPNT: CHKPOINT's image in a material of its own (the other checkpoint banners keep theirs); FINISH at the
+        // same size (Market's is 128 x 32 against CHKPOINT's 256 x 64), so the swap keeps the faces' coordinates.
+        const Texture& ct = t.textures[size_t(chk_texture)];
+        const Texture& ft = t.textures[size_t(finish_texture)];
+        int w = std::max(ct.w, 1), h = std::max(ct.h, 1);
+        std::vector<uint8_t> chk_rgba, fin_rgba, fin_src;
+        if (!ct.rgba(texels, chk_rgba)) chk_rgba.assign(size_t(w) * h * 4, 255);
+        int fw = std::max(ft.w, 1), fh = std::max(ft.h, 1);
+        if (!ft.rgba(texels, fin_src)) fin_src.assign(size_t(fw) * fh * 4, 255);
+        fin_rgba.resize(size_t(w) * h * 4);
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                size_t s = (size_t(y * fh / h) * fw + size_t(x * fw / w)) * 4;
+                std::memcpy(&fin_rgba[(size_t(y) * w + x) * 4], &fin_src[s], 4);
+            }
+        }
+        std::array<int, 2> wrap{ ct.clamp_s() ? 33071 : 10497, ct.clamp_t() ? 33071 : 10497 };
+        std::string mode = g.js["materials"][material(chk_texture)].value("alphaMode", std::string("OPAQUE"));
+        int chk_material = g.material("CHKPNT", g.image("CHKPNT", png(chk_rgba, w, h)), mode, true, wrap);
+        g.material("FINISH", g.image("FINISH", png(fin_rgba, w, h)), mode, true, wrap);
+        std::vector<Glb::Prim> list = banner_prims.list();
+        for (Glb::Prim& p : list) p.material = chk_material;
+        g.textured_mesh("FINISH_BANNER", list);
+        report.push_back("finish banner: " + banner->o->name + "'s CHKPOINT faces as FINISH_BANNER, turning to FINISH on the last lap");
+    }
     size_t moving_collision = 0;
     std::string mover_toml;
     for (const Mover& mv : movers) {
@@ -1759,6 +1931,59 @@ static bool build_one(const ArcadeGame& game, const std::filesystem::path& data_
             return 2;
         };
         std::stable_sort(list.begin(), list.end(), [&](const auto& a, const auto& b) { return layer(a) < layer(b); });
+        if (rock) {
+            // The arcade draws its distant land and cloud strips with depth. Drawn without it a material at a time,
+            // Embarcadero's Marin hills (MARINTX2) painted over the nearer ROC2MAR2 hills (a straight cut down the
+            // hillside), the far skyline strip (CLOUDS2) over the hills' end (a diagonal cut), and the hills' feet, below
+            // the water, over the bay. So they are drawn back to front, triangle by triangle (by their
+            // middle's distance across the ground: the sky is always centered on the camera), as runs of one
+            // material (track_mod_convert.cpp keeps the order), and the land is cut off at the water's height.
+            double water_y = -std::numeric_limits<double>::infinity();
+            for (const Glb::Prim& p : list) {
+                if (layer(p) != 1) continue;
+                for (const V3& v : p.verts) water_y = std::max(water_y, v[1]);
+            }
+            std::vector<Glb::Prim> sorted;
+            std::vector<std::pair<double, SkyTri>> tris;
+            for (const Glb::Prim& p : list) {
+                if (layer(p) < 2) { sorted.push_back(p); continue; }
+                for (const auto& tr : p.tris) {
+                    SkyTri t;
+                    t.material = p.material;
+                    t.has_col = !p.colors.empty();
+                    for (int k = 0; k < 3; k++) {
+                        t.v[k] = p.verts[tr[k]];
+                        t.n[k] = p.normals[tr[k]];
+                        t.uv[k] = p.uvs[tr[k]];
+                        if (t.has_col) t.col[k] = p.colors[tr[k]];
+                    }
+                    std::vector<SkyTri> kept = layer(p) == 2 && std::isfinite(water_y) ? keep_above(t, water_y) : std::vector<SkyTri>{ t };
+                    for (const SkyTri& k : kept) {
+                        double nearest = std::numeric_limits<double>::infinity();
+                        for (const V3& v : k.v) nearest = std::min(nearest, std::hypot(v[0], v[2]));
+                        tris.push_back({ nearest, k });
+                    }
+                }
+            }
+            std::stable_sort(tris.begin(), tris.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+            for (const auto& [d, t] : tris) {
+                if (sorted.empty() || sorted.back().material != t.material || layer(sorted.back()) < 2) {
+                    Glb::Prim p;
+                    p.material = t.material;
+                    sorted.push_back(p);
+                }
+                Glb::Prim& p = sorted.back();
+                uint32_t base = uint32_t(p.verts.size());
+                for (int k = 0; k < 3; k++) {
+                    p.verts.push_back(t.v[k]);
+                    p.normals.push_back(t.n[k]);
+                    p.uvs.push_back(t.uv[k]);
+                    if (t.has_col) p.colors.push_back(t.col[k]);
+                }
+                p.tris.push_back({ base, base + 1, base + 2 });
+            }
+            list = std::move(sorted);
+        }
         g.textured_mesh("SKY", list);
     }
     if (cancelled && cancelled()) return false;
@@ -1955,6 +2180,65 @@ static bool build_one(const ArcadeGame& game, const std::filesystem::path& data_
     const bool run_in = norm(lap.front() - lap.back()) > 300.0;
     if (run_in) report.push_back("dpath table 0: a run-in lap (its ends are " + std::to_string(int(norm(lap.front() - lap.back()))) +
                                  " ft apart): a run-in circuit");
+    // Table 0 where every racing line leaves it: The Heights' (TRACK6) lap runs up to 149 ft off all seven lines at
+    // records 97-136, and Sunset's (TRACK7) has a 63 ft kink at record 840 that every line skips. Table 0 becomes
+    // AIPATH_main: the drones' target speeds, the gates, the road's width there, and the cross lines the painted lanes
+    // are matched along, which met the lanes out of order where it ran at an angle to them (the wrecks there were those
+    // lanes stepping back, fixed in the custom track converter's paint_lane). Where the nearest point of every racing line on
+    // the course (heading the same way) is more than `agree` ft off across the ground, the lap point moves across the
+    // ground to their mean, fully from `full` ft on (its height stays: over a jump it is the cars' arc, the lines are on
+    // the road); nowhere else does table 0 change. docs/sfrush_arcade.md#checks
+    {
+        constexpr double agree = 45.0, full = 60.0;   // wide roads have every line 30-46 ft to one side (Civic, Haight)
+        std::vector<std::vector<V3>> others;
+        for (size_t k = 1; k < tables.size(); k++) {
+            size_t m = std::min<size_t>(tables[k].lap_count, tables[k].records.size());
+            if (m < 10) continue;
+            std::vector<V3> pts;
+            std::vector<double> d;
+            for (size_t i = 0; i < m; i++) {
+                pts.push_back(tables[k].records[i].pos);
+                double b = 1e300;
+                for (const V3& q : lap) b = std::min(b, norm(q - pts.back()));
+                d.push_back(b);
+            }
+            std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
+            if (d[d.size() / 2] <= 60.0) others.push_back(std::move(pts));   // a racing line on this course (as below)
+        }
+        auto heading = [](const std::vector<V3>& p, size_t i) {
+            V3 d = p[std::min(i + 1, p.size() - 1)] - p[i > 0 ? i - 1 : 0];
+            return unit(V3{ d[0], 0.0, d[2] });
+        };
+        std::vector<V3> fixed = lap;
+        int moved = 0;
+        double worst = 0;
+        for (size_t i = 0; others.size() >= 3 && i < n; i++) {
+            V3 h = heading(lap, i), sum{};
+            double dmin = 1e300;
+            for (const auto& line : others) {
+                size_t best = 0;
+                double bd = 1e300;
+                for (size_t j = 0; j < line.size(); j++) {
+                    double d = std::hypot(line[j][0] - lap[i][0], line[j][2] - lap[i][2]);
+                    if (d < bd && dot(heading(line, j), h) > 0.5) bd = d, best = j;
+                }
+                sum = sum + line[best];
+                dmin = std::min(dmin, bd);
+            }
+            if (dmin <= agree || dmin > 1e299) continue;
+            double w = std::min(1.0, (dmin - agree) / (full - agree));
+            V3 to = sum * (1.0 / others.size());
+            fixed[i][0] += (to[0] - lap[i][0]) * w;   // across the ground only: over a jump table 0 is the cars' arc
+            fixed[i][2] += (to[2] - lap[i][2]) * w;
+            moved++;
+            worst = std::max(worst, dmin);
+        }
+        if (moved) {
+            lap = fixed;
+            report.push_back("dpath table 0: " + std::to_string(moved) + " lap points more than " + std::to_string(int(agree)) +
+                             " ft from every racing line (up to " + std::to_string(int(worst)) + " ft) moved onto them");
+        }
+    }
     auto tangent = [&](size_t i) {
         V3 d = run_in ? lap[std::min(i + 1, n - 1)] - lap[i > 0 ? i - 1 : 0] : lap[(i + 1) % n] - lap[(i + n - 1) % n];
         double l = std::hypot(d[0], d[2]);
@@ -2200,6 +2484,74 @@ static bool build_one(const ArcadeGame& game, const std::filesystem::path& data_
         report.push_back("dpath table 0: " + std::to_string(t0.records.size() - n) +
                          " records past the lap (routes off the course, not raced), left out");
     }
+    // Shortcut lines: a racing line that leaves table 0's route (more than `off_route` ft off it for `min_stretch` points
+    // in a row) where fewer than half of the lines go with it (within `together` ft) is left out. Rush The Rock's Golden
+    // Gate and Embarcadero table 7 and The Rock's tables 2 and 5 are shortcuts no N64 lane drives (up to 664, 396 and
+    // 194 ft off table 0), along dirt and strips outside the road's walls and back through them (solid walls in the
+    // arcade's own collision too); Rush 2049's Metro has tables 1-3 of 7 on a route of their own for 28 records. Rush 2
+    // drones on them drove into the walls every lap: every wreck of that lane's cars (37 of 37 on Embarcadero, 29 of 30
+    // on Golden Gate). A route most lines take (The Heights, Sunset: all seven, where table 0 was repaired above) stays.
+    // docs/sfrush_arcade.md#checks
+    {
+        constexpr double off_route = 60.0, together = 30.0;
+        constexpr size_t min_stretch = 5;
+        std::vector<Line> kept_lines{ lines[0] };
+        for (size_t a = 1; a < lines.size(); a++) {
+            const auto& P = lines[a].pts;
+            size_t run = 0, start = 0;
+            bool shortcut = false;
+            for (size_t i = 0; i < P.size() && !shortcut; i++) {
+                bool alone = false;
+                if (norm(lap[nearest(P[i])] - P[i]) > off_route) {
+                    size_t on = 1;   // lines on this route, this one included (table 0 isn't)
+                    for (size_t b = 1; b < lines.size(); b++) {
+                        if (b == a) continue;
+                        double bd = 1e300;
+                        for (const V3& q : lines[b].pts) bd = std::min(bd, norm(q - P[i]));
+                        on += bd <= together;
+                    }
+                    alone = 2 * on < lines.size();
+                }
+                if (!alone) {
+                    run = 0;
+                    continue;
+                }
+                if (run++ == 0) start = i;
+                shortcut = run >= min_stretch;
+            }
+            if (shortcut) {
+                char line[200];
+                snprintf(line, sizeof(line), "dpath table %zu: a route of its own from (%.0f, %.0f, %.0f) (a shortcut most racing "
+                         "lines don't take), left out", lines[a].table, P[start][0], P[start][1], P[start][2]);
+                report.push_back(line);
+                continue;
+            }
+            kept_lines.push_back(lines[a]);
+        }
+        lines = std::move(kept_lines);
+    }
+    // Hand fixes where a racing line runs a Rush 2 car into something (race audits with tools/drone_pace.py, both
+    // directions; the lines are raced backward too, the other way round): the lines within `radius` ft of (x, z) move
+    // by (dx, dz) ft, fully at the point and fading out to the radius. docs/sfrush_arcade.md#checks
+    struct LineFix { const char* folder; double x, z, radius, dx, dz; };
+    static const LineFix line_fixes[] = {
+        // Embarcadero: tables 1-2 pass 3-4 ft from the tip of a wedge of wall at (-3967, -320) just before the finish
+        // line; backward, every lap's car on them hit it (20 crashes a race, laps lost at checkpoint 0). 8 ft onto the
+        // open road.
+        { "TRACK2", -3967, -322, 120, -0.62 * 8, -0.785 * 8 },
+    };
+    for (const LineFix& lf : line_fixes) {
+        if (!rock || std::strcmp(lf.folder, folder) != 0) continue;
+        for (size_t a = 1; a < lines.size(); a++) {
+            for (V3& p : lines[a].pts) {
+                double d = std::hypot(p[0] - lf.x, p[2] - lf.z);
+                if (d >= lf.radius) continue;
+                double t = 1.0 - d / lf.radius, w = t * t * (3 - 2 * t);
+                p[0] += lf.dx * w;
+                p[2] += lf.dz * w;
+            }
+        }
+    }
     // Left to right in the race direction: the mean offset along the lap's left-hand lateral.
     auto side = [&](const std::vector<V3>& pts) {
         double sum = 0;
@@ -2284,6 +2636,7 @@ static bool build_one(const ArcadeGame& game, const std::filesystem::path& data_
         log += line;
     }
     if (knocks) log += "props: KNOCK " + std::to_string(knocks) + "\n";
+    for (const auto& [kind, count] : breakables) log += "breakables: PROP_" + kind + " " + std::to_string(count) + "\n";
     for (const std::string& r : report) log += r + "\n";
     return true;
 }

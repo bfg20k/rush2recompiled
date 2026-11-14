@@ -271,8 +271,12 @@ wide`) and says which it is when it is standing up or too narrow.
   is spread across `AIPATH_main`'s ribbon as above. `AIPATH_main` is still needed: it is the race's progress line and
   sets the speeds, and the lanes are matched to it point for point, so keep each lane beside it, within about
   2.5 times its ribbon's half width (at least 18 m) and 9 m (30 ft) of its height. Where a lane wanders further (or
-  leaves a gap), that stretch uses the spread lane instead and the report says where. Backward races drive the same
-  lanes the other way. Arenas ignore these curves (their lanes are their route).
+  leaves a gap), that stretch uses the spread lane instead and the report says where. Where `AIPATH_main` bends
+  sharply or runs at an angle to a lane, the lines across the road through neighboring points can meet the lane out of
+  order, which would make the lane step back and forward again (a hairpin the computer cars wreck at): the converter
+  keeps the matches that move forward along the lane and puts the others, and any point with no match within 10 points
+  of good ones, on the lane between them (the report lists how many). Backward races drive the same lanes the other
+  way. Arenas ignore these curves (their lanes are their route).
 - **Direction:** the race runs the way the markers' green arrows point. The curve can be drawn either way round; if most
   arrows disagree with it, the game reverses it, and a single marker pointing against the rest is reported and used
   turned round.
@@ -300,7 +304,9 @@ wide`) and says which it is when it is standing up or too narrow.
   `(all from _SPEED)` or `(some from _SPEED)`. A second attribute, `_AI_MODE`, sets how the cars steer along that
   stretch, as the stock lanes do: 2 (the default) holds the line closely, 5 steers more loosely. Painted
   `AIPATH_lane` curves can carry their own `_SPEED` and `_AI_MODE`; lanes without them use `AIPATH_main`'s. Backward
-  races work out their own speeds.
+  races work out their own speeds from the bends, held at each point to the slowest `_SPEED` you gave that point
+  (on `AIPATH_main` or a lane), and brake for those from the other side: a corner or crest is taken no faster
+  backward than forward.
 - **Paths drawn at road height everywhere:** the game keeps the path at the curve's height over a gap only where the
   road below drops away sharply at the gap's ends. If your curve follows the road everywhere except over long jumps,
   where it follows the cars' arc, give `AIPATH_main` a custom property `keep_height` set to True (Object Properties >
@@ -337,6 +343,7 @@ sky          = "none"      # a stock sky: see Sky
 cloud_scroll = 0.0         # sky texture scroll speed (the clouds sky)
 sky_parallax = 0.0         # how much the sky shifts as the camera moves (the clouds sky)
 # car_light  = "#454046"   # a night track: every car drawn darkened by this color: see Night
+# snowfall   = 1           # falling snow: see Snowfall
 
 # [handling]
 # traction = [[32, 0.5], [64, 0.25]]   # a slippery track (snow, ice): see Handling
@@ -407,6 +414,32 @@ car_light = "#454046"   # every car is drawn multiplied by this color
   Lighting settings (Graphics tab): with Light Probes the cars still darken under bridges and in tunnels, then take
   this color on top. Rush 2's own tunnel shading stays too.
 - The SF Rush PlayStation mod's NIGHT versions use it, with the PlayStation's night textures, fog and sky.
+- A track whose `fog_color` is near black (luminance under 0.1, as `"#0c1424"`) is a night track for Graphics > Car
+  Lights: every car's headlamps and tail lamps light it (docs/graphics_effects.md#car-lights). A lighter fog keeps
+  them off.
+
+### Snowfall
+
+Snow can fall in the race, round every player's camera:
+
+```toml
+[look]
+snowfall = 1   # 0 none (the default), 1 the SF Rush PlayStation mod's SNOW versions, up to 3
+```
+
+- How much falls follows the race's FOG option: none at FOG 1 (no fog), a light fall drifting down at 2 (1,100
+  flakes round each camera, 3.5 ft/s), a steady one at 3 (3,000, 9 ft/s) and a blizzard driven sideways at 4 (6,000,
+  20 ft/s down, 11 across). The flakes are 1-2 inches across, stretched along their fall the faster they go.
+  `snowfall` multiplies the count (up to 3 times, at most 9,000).
+- The flakes fall and drift by the game clock, so they hold still while the game is paused, and are fogged like the
+  track, so the far ones fade into the fog. Every player's view has its own.
+- Graphics > Falling Snow turns it on and off for every track (Off by default; the Enhanced setup turns it on). None
+  of the original games has falling snow (the PlayStation SF Rush's snow versions don't); src/snowfall.cpp has how
+  it is drawn.
+- A diorama's snowflakes: give them a material whose name starts with `SNOWFLAKES` and the same setting shows or hides
+  them on the track select (they're drawn last, between two tagged G_NOOPs the track select branches past while it is
+  off: include/snowfall.h). They don't count against the diorama's triangle budget. The SF Rush PlayStation mod's
+  Chinatown SNOW uses it.
 
 ### Handling
 
@@ -513,7 +546,9 @@ To model the sky yourself:
    which darkens its sides; paint it white to keep a texture's own colors.
 4. **Add stars, a sun or clouds** as separate faces just inside the dome, in a material with Alpha Clip (cutouts).
    The sky is drawn without depth, in the order its materials first appear in the file, so keep the dome's material
-   first and the details' after it, or the dome paints over them.
+   first and the details' after it, or the dome paints over them. (A sky that uses a material again after another
+   one is drawn in its exact triangle order instead; the converted SF Rush arcade tracks use that to draw their
+   distant hills back to front.)
 5. **Name the object `SKY`.** Several objects named `SKY`, `SKY.001`, ... are joined into one sky.
 
 The sky is drawn behind everything and isn't fogged, as Rush 2049's skies are. The report gives its triangle count
@@ -651,21 +686,22 @@ row of trees costs little.
 
 ### Props
 
-Meshes named `PROP_<kind>_<name>` react when a car hits them, the way Rush 2049's do:
+Meshes named `PROP_<kind>_<name>` are knocked over when a car hits them. They are Rush 2's own breakables, drawn with
+your mesh: they move and sound as Rush 2's do.
 
-| Name | When a car hits it | As Rush 2049's |
+| Name | Rush 2's | Sound |
 |---|---|---|
-| `PROP_KNOCK_*` | Flies off spinning and is gone after 5 seconds | cones |
-| `PROP_TIP_*` | Turns to face the car, tips over and stays down | road signs |
+| `PROP_KNOCK_*` | cone | a cone's |
+| `PROP_TIP_*` | metal sign | a sign's |
+| `PROP_TREE_*` | tree | a tree's |
+| `PROP_METER_*` | parking meter (always faces the camera, as Rush 2's flat meters do) | a meter's |
 
-Put each prop's origin at its foot: a sign tips over about it. Its location, rotation and scale are kept. Give a prop
-a custom property `billboard` set to True (Object Properties > Custom Properties) to make it a billboard too: it faces
-the camera and keeps facing it as it flies off, which suits flat cones. Every prop is back in place at the start of
-each race. There are no collectibles (coins, keys) on custom tracks (the game's own arcade versions of the stock
-courses carry their course's: docs/arcade2049.md#coins-and-keys-on-the-arcade-versions).
-
-Props react only when the Rush 2049 ROM is set in the Games tab, because their movement and sounds come from
-Rush 2049. Without it they stand still and cars drive through them.
+Put each prop's origin at its foot: Rush 2 knocks it over about that point, and a car hits it there. Its location,
+rotation and scale are kept. Give a prop a custom property `billboard` set to True (Object Properties > Custom
+Properties) to make it a billboard too: it faces the camera, which suits flat cones. Every prop is back in place at the
+start of each race. Rush 2 holds 130 breakables on a track; props past that aren't placed (the report says so). There
+are no collectibles (coins, keys) on custom tracks (the game's own arcade versions of the stock courses carry their
+course's: docs/arcade2049.md#coins-and-keys-on-the-arcade-versions).
 
 ### See-through materials
 
@@ -937,7 +973,7 @@ Every name, custom property and setting a track can use, on one page. Each links
 | `TRIGGER_<name>` | A box that sets off moving objects ([Trigger boxes](#trigger-boxes)) |
 | `MOVE_<name>` | A moving object; its children move with it ([Moving objects](#moving-objects)) |
 | `BILLBOARD_<name>` | Turns to face the camera ([Billboards](#billboards)) |
-| `PROP_KNOCK_*`, `PROP_TIP_*` | Knocked flying or tipped over by cars ([Props](#props)) |
+| `PROP_KNOCK_*`, `PROP_TIP_*`, `PROP_TREE_*`, `PROP_METER_*` | Knocked over by cars as Rush 2's cones, signs, trees and meters ([Props](#props)) |
 | `SKY` | Your own sky dome ([Your own sky](#your-own-sky)) |
 | `FINISH_BANNER`, `FINISH_BANNER_LAST` | The finish banner, CHKPNT turning to FINISH on the last lap ([Finish banner](#finish-banner)) |
 | `START_1` to `START_4`, `PICKUP_<kind>` | Arenas only ([Stunt and battle arenas](#stunt-and-battle-arenas)) |
@@ -965,7 +1001,7 @@ Attributes (tick Data > Mesh > Attributes when you export).
 |---|---|---|
 | `[track]` | `name` (required), `author`, `version`, `description`, `type`, `gravity`, `road_hold`, `point_to_point`, `run_in`, `stunts`, `smooth_collision`, `smooth_fold`, `smooth_height` | [track.toml](#tracktoml), [Smooth collision](#smooth-collision) |
 | `[race]` | `start_time`, `finish_time`, `checkpoint_time`, `best_times` | [track.toml](#tracktoml) |
-| `[look]` | `fog_color`, `sky`, `cloud_scroll`, `sky_parallax`, `car_light` | [Sky](#sky), [Night](#night) |
+| `[look]` | `fog_color`, `sky`, `cloud_scroll`, `sky_parallax`, `car_light`, `snowfall` | [Sky](#sky), [Night](#night), [Snowfall](#snowfall) |
 | `[handling]` | `traction`, `air_gravity` | [Handling](#handling) |
 | `[ai]` | `speed_quantiles`, `traction_margin`, `speed_scale` | [AI speeds](#ai-speeds) |
 | `[movers.<name>]` | `mode`, `races`, `start`, `open`, `close`, `open_delay`, `close_delay`, `open_at_start` | [Moving objects](#moving-objects) |
@@ -1152,11 +1188,16 @@ merges and renames as needed.
   culling box. A billboard's record carries node flag 0x8000: `scene_walk` (0x8007B518, branch at 0x8007B860) then
   draws it with `view_billboard_basis_8007BF2C`'s yaw-only matrix at its pose's position only (no rotation or scale),
   showing the model's -z side, so the converter turns a billboard's mesh half a turn about y (Blender's front then
-  faces the camera) and keeps its scale in the vertices. Props are listed as `PropRecord`s of type
-  `rush2::track2049::prop_knock` (-2) or `prop_tip` (-3), handed to `set_prop_data` like a 2049 track's;
-  `src/rush2049/track2049_props.cpp` resolves them at race setup to the rows of 2049's CONE1 and STOPHIT types
-  (`movers::classify`), so the mod's own model reacts as those do. Custom tracks have no collectibles.
-  `track_mod_cases.py`'s `objects` case checks the records, flags, shared models and prop types.
+  faces the camera) and keeps its scale in the vertices. A prop is a Rush 2 breakable instead (`prop_classes` in
+  `src/track_mod/track_mod_convert.cpp`): a child record of its nearest section, as a stock track's keys are, named
+  `<class>P<n>` (CONE1, CURVEHIT, TREEHIT, METER: the placement classifier func_800815DC takes the class from the name's
+  prefix), at its world position (the placement walker makes it relative to its section). The class's model lookup
+  is redirected to the prop's own model (`ConvertedTrack::record_models`, applied with `rush2::track1::set_redirects`
+  by src/rush2049/track2049.cpp, as an SF Rush track's breakables are), whose name record carries the behaviour id of
+  the model the class normally draws (2 for CONE1O1, 5 for the others: docs/rush2049_research/placement.md#13-behaviour-ids),
+  so Rush 2's own breakable code hits, moves and sounds it. Before 2026-11-13 props ran Rush 2049's prop code and
+  needed the 2049 ROM. Custom tracks have no collectibles. `track_mod_cases.py`'s `objects` case checks the records,
+  flags, shared models and prop classes.
 - **Sections:** visible triangles go into 1,024 ft grid cells by their center (s16 vertices at 1/16 ft reach 2,000 ft
   from the record). A triangle wider than a cell, or reaching past its cell's 2,000 ft, joins the first such section
   whose origin reaches all its corners, else starts one at its center. Before, each got a section of its own: the

@@ -195,6 +195,8 @@ int rush2_track49_keys(uint8_t* rdram, recomp_context* ctx);
 void rush2_track49_race_start(uint8_t* rdram, recomp_context* ctx);
 void rush2_track49_movers_tick(uint8_t* rdram, recomp_context* ctx);
 void rush2_car49_list(uint8_t* rdram, recomp_context* ctx);
+// The car select's part matrices in their own room (issue 67, src/rush2049/car2049.cpp).
+void rush2_preview_matrix_base(uint8_t* rdram, recomp_context* ctx);
 void rush2_car49_logo(uint8_t* rdram, recomp_context* ctx);
 void rush2_car49_paint(uint8_t* rdram, recomp_context* ctx);
 void rush2_car49_drone(uint8_t* rdram, recomp_context* ctx);
@@ -458,8 +460,9 @@ void rush2_calspeed_respawn_place(uint8_t* rdram, recomp_context* ctx);
 void rush2_calspeed_wheel_support(uint8_t* rdram, recomp_context* ctx);
 // A custom track's [handling] traction in car_linear_accel_stage (src/track_traction.cpp).
 void rush2_track_traction(uint8_t* rdram, recomp_context* ctx);
-// Car Lights: the lit brake lights' markers on a night track, before each view (src/car_lights.cpp).
+// Car Lights: each car's lamps on a night track, placed before each view (src/car_lights.cpp).
 void rush2_car_lights_view(uint8_t* rdram, recomp_context* ctx);
+void rush2_snowfall_view(uint8_t* rdram, recomp_context* ctx);
 // California Speed's walls and missed wheels (src/calspeed/calspeed_walls.cpp) and physics (calspeed_physics.cpp),
 // with the CS Physics option.
 int rush2_calspeed_wall_collision(uint8_t* rdram, recomp_context* ctx);
@@ -563,6 +566,7 @@ void rush2_music_pause_release(uint8_t* rdram, recomp_context* ctx);
 void rush2_pause_widgets(uint8_t* rdram, recomp_context* ctx);
 void rush2_pause_menu_input(uint8_t* rdram, recomp_context* ctx);
 void rush2_drone_catch_up(uint8_t* rdram, recomp_context* ctx);
+void rush2_checkpoint_time_difficulty(uint8_t* rdram, recomp_context* ctx, int reg);
 void rush2_car_rows_frame(uint8_t* rdram, recomp_context* ctx);
 void rush2_car_rows_text(uint8_t* rdram, recomp_context* ctx);
 void rush2_car_rows_widget(uint8_t* rdram, recomp_context* ctx, int shift, int swatch);
@@ -585,6 +589,7 @@ void rush2_npc_cars_rim_init(uint8_t* rdram, recomp_context* ctx);
 // Paint colors with the Rush 2049 shades (src/paint_colors.cpp).
 void rush2_paint_rgba_table(uint8_t* rdram, recomp_context* ctx, uint64_t* reg);
 void rush2_paint_5551_table(uint8_t* rdram, recomp_context* ctx, uint64_t* reg);
+void rush2_map_dot_colors(uint8_t* rdram, recomp_context* ctx);
 void rush2_paint_convert(uint8_t* rdram, recomp_context* ctx);
 void rush2_paint_get(uint8_t* rdram, recomp_context* ctx, uint32_t at, int field, uint64_t* value);
 void rush2_paint_set(uint8_t* rdram, recomp_context* ctx, int field);

@@ -17,9 +17,9 @@
 //   SKY                       the sky: its own model SKYO1, drawn around the camera without depth or fog.
 //   BILLBOARD_<name>          a card that turns about its vertical axis to face the camera (Rush 2's node flag
 //                             0x8000): its own model, shared by billboards of the same mesh and scale.
-//   PROP_KNOCK_*, PROP_TIP_*  props a car knocks flying (gone after 5 s) or tips over, as Rush 2049's cone and signs
-//                             (src/rush2049/track2049_props.cpp): its own model, shared by props of the same mesh and
-//                             scale, at the node's position and rotation.
+//   PROP_KNOCK_*, PROP_TIP_*, PROP_TREE_*, PROP_METER_*  props cars hit: Rush 2's own breakable cones, signs, trees and
+//                             parking meters (prop_classes) drawn with the prop's own model, shared by props of the same
+//                             mesh and scale, at the node's position and rotation.
 //   anything else with a mesh the visible track.
 //
 // Formats: geometry docs/rush2049_research/geometry.md section 2, placement docs/rush2049_research/placement.md,
@@ -42,6 +42,7 @@
 #include "gltf_scene.h"
 #include "texture_upscale.h"
 #include "collision_polys.h"
+#include "snowfall.h"
 #include "track_mod.h"
 
 namespace {
@@ -51,6 +52,22 @@ namespace {
     constexpr float feet_per_meter = 3.2808399f;
     constexpr float section_size = 1024.0f;     // ft: visual sections (models) on a grid
     constexpr float vertex_reach = 2000.0f;     // ft: s16 vertices at 1/16 ft reach 2047 ft from their record
+    // Props (PROP_<kind>_*) are Rush 2's own breakables (docs/custom_tracks.md#props): a record of the class whose
+    // name it starts with (the placement classifier, func_800815DC), drawing the prop's model (the class's model lookup
+    // redirected to it, ConvertedTrack::record_models), which carries the behaviour id of the model the class normally
+    // draws (docs/rush2049_research/placement.md#13-behaviour-ids). Rush 2 then hits, moves and sounds it as its
+    // own cones, signs, trees and meters, as the SF Rush and California Speed tracks' breakables
+    // (src/rush1/track1_convert.cpp). Index 0 is no prop.
+    struct PropClass {
+        const char* kind;       // after PROP_
+        const char* record;     // the class (record name prefix)
+        uint16_t behaviour;     // of CONE1O1, CURVEHITO1, TREEHIT1O1, METERO1
+        const char* what;
+    };
+    constexpr PropClass prop_classes[] = { { "", "", 0, "" }, { "KNOCK", "CONE1", 2, "cone" },
+        { "TIP", "CURVEHIT", 5, "sign" }, { "TREE", "TREEHIT", 5, "tree" }, { "METER", "METER", 5, "parking meter" } };
+    // Rush 2 holds 0x82 breakables (func_800BB27C), the course's keys among them.
+    constexpr size_t max_breakables = 0x82;
     constexpr float spine_step = 20.0f;         // ft between AI path points (the stock files' spacing)
     constexpr int max_checkpoints = 9;          // 10 checkpoint records, the finish line one of them
     constexpr int leaf_limit = 12;              // polygons per quadtree leaf before it splits
@@ -1285,8 +1302,17 @@ namespace {
             return false;
         }
 
-        if (tris.size() > diorama_triangle_budget) {
-            report.warning(what + " makes a diorama of " + std::to_string(tris.size()) + " triangles (the stock ones have "
+        // A material named SNOWFLAKES (a snow track's flakes over its diorama) is drawn last, between G_NOOPs tagged for
+        // Graphics > Falling Snow (include/snowfall.h), which the track select branches past while it is off. Its
+        // flakes are small and don't count against the budget.
+        auto is_flake = [&](const VisualTri& t) {
+            return t.material >= 0 && t.material < (int)scene.materials.size() &&
+                   scene.materials[size_t(t.material)].name.rfind("SNOWFLAKES", 0) == 0;
+        };
+        size_t solid_tris = 0;
+        for (const VisualTri& t : tris) solid_tris += !is_flake(t);
+        if (solid_tris > diorama_triangle_budget) {
+            report.warning(what + " makes a diorama of " + std::to_string(solid_tris) + " triangles (the stock ones have "
                            "at most about 2400); the track select may slow down.");
         }
 
@@ -1328,17 +1354,23 @@ namespace {
         m.cmd(0xE3000F00, 0x00000000);          // no mipmaps
         m.cmd(combine[0], combine[1]);
         m.cmd(0xD7000002, 0xFFFFFFFF);          // G_TEXTURE on, tile 0, scale 1
-        std::vector<int> all(tris.size());
-        for (size_t i = 0; i < tris.size(); i++) all[i] = int(i);
+        std::vector<int> solid, flakes;
+        for (size_t i = 0; i < tris.size(); i++) (is_flake(tris[i]) ? flakes : solid).push_back(int(i));
         // Inline loads: the loader doesn't relocate inside called lists (func_8007786C doesn't enter G_DL targets).
-        emit_mesh(tris, all, order, draw, origin, unit, [&](MeshList& ml, size_t mi) {
+        auto load = [&](MeshList& ml, size_t mi) {
             bool first = true;
             for (const auto& [w0, w1] : texture_load(textures[mi], mats[mi], texel_at[mi])) {
                 if (first) settimg.push_back(ml.list.size());
                 first = false;
                 ml.cmd(w0, w1);
             }
-        }, m);
+        };
+        emit_mesh(tris, solid, order, draw, origin, unit, load, m);
+        if (!flakes.empty()) {
+            m.cmd(0x00000000, rush2::snowfall::flakes_start_tag);   // G_NOOP "SNOW"
+            emit_mesh(tris, flakes, order, draw, origin, unit, load, m);
+            m.cmd(0x00000000, rush2::snowfall::flakes_end_tag);     // G_NOOP "SNOE"
+        }
         m.cmd(0xE3001001, 0x00008000);          // the TLUT mode Rush 2's lists leave set (RGBA16)
         m.cmd(0xDF000000, 0);
         align8(d);
@@ -1461,6 +1493,14 @@ bool rush2::track_mod::parse_settings(const std::string& text, Settings& s, Repo
     }
     if (auto v = t["look"]["cloud_scroll"].value<double>()) s.cloud_scroll = float(*v);
     if (auto v = t["look"]["sky_parallax"].value<double>()) s.sky_parallax = float(*v);
+    if (auto v = t["look"]["snowfall"].value<double>()) {
+        if (*v >= 0.0 && *v <= 3.0) {
+            s.snowfall = float(*v);
+        }
+        else {
+            report.error("track.toml: [look] snowfall must be from 0 to 3; the track has no falling snow.");
+        }
+    }
     if (auto v = t["look"]["car_light"].value<std::string>()) {
         unsigned r, g, b;
         if (v->size() == 7 && (*v)[0] == '#' && sscanf(v->c_str() + 1, "%02x%02x%02x", &r, &g, &b) == 3) {
@@ -1777,8 +1817,14 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
         }
         if (starts(name, "PROP_")) {
             std::string kind = upper(name.substr(5));
-            int type = starts(kind, "KNOCK") ? rush2::track2049::prop_knock : starts(kind, "TIP") ? rush2::track2049::prop_tip : 0;
-            if (!type) report.warning(n.name + ": unknown prop; use PROP_KNOCK_<name> or PROP_TIP_<name>. Ignored.");
+            int type = 0;
+            for (int k = 1; k < int(std::size(prop_classes)); k++) {
+                if (starts(kind, prop_classes[k].kind)) type = k;
+            }
+            if (!type) {
+                report.warning(n.name + ": unknown prop; use PROP_KNOCK_<name>, PROP_TIP_<name>, PROP_TREE_<name> or "
+                               "PROP_METER_<name>. Ignored.");
+            }
             else if (!mesh) report.warning(n.name + " has no mesh; ignored.");
             else prop_nodes.push_back({ type, &n });
             continue;
@@ -2809,7 +2855,8 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
     // allows round the corner ahead, braked for at its grip. Empty without traction. Authored spine speeds take it in
     // target_speeds, painted lanes' in write_path.
     std::vector<float> traction_cap;
-    auto target_speeds = [&](const std::vector<PathPoint>& sp, bool forward) {
+    // ceiling (mph per point of sp, NaN = none): the backward race's limit from the forward race's authored speeds.
+    auto target_speeds = [&](const std::vector<PathPoint>& sp, bool forward, const std::vector<float>* ceiling = nullptr) {
         size_t n = sp.size();
         // Point i + k along the race: a circuit wraps to its start, a run-in circuit to its loop start, a
         // point-to-point path stops at its end.
@@ -2909,6 +2956,7 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
                 }
             }
             v[i] = with_traction(s, r, straights) * 1.4667f * settings.ai_speed_scale;
+            if (ceiling && i < ceiling->size() && !std::isnan((*ceiling)[i])) v[i] = std::min(v[i], (*ceiling)[i] * 1.4667f);
         }
         // Authored speeds (AIPATH_main's _SPEED, forward races only) replace the computed ones and keep their own
         // braking; AISPEED caps still apply, and so does traction: an authored speed is held to what the grip allows
@@ -3047,6 +3095,7 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
         constexpr float gate_height = 30.0f;
         size_t n = spine.size(), missed = 0;
         Vec3 first_missed{};
+        std::vector<double> picked_at(n, std::nan(""));   // where along the lane each spine point's pick is (segment + fraction)
         for (size_t i = 0; i < n; i++) {
             const PathPoint& q = spine[i];
             Vec3 fwd = sub(spine[(i + 1) % n].p, spine[(i + n - 1) % n].p);
@@ -3088,6 +3137,7 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
                     float s0 = ribbon.speed[j], s1 = ribbon.speed[jb];
                     pick_speed = std::isnan(s0) || std::isnan(s1) ? (f < 0.5f ? s0 : s1) : s0 + (s1 - s0) * f;
                     pick_mode = f < 0.5f ? ribbon.mode[j] : ribbon.mode[jb];
+                    picked_at[i] = double(j) + f;
                 }
             }
             if (best == 1e30f) {
@@ -3097,6 +3147,72 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
             lane[i] = on_road(pick, q.air || pick_lifted);
             lane_speed[i] = pick_speed;
             lane_mode[i] = pick_mode;
+        }
+        // Picks out of order along the lane: where AIPATH_main bends sharply or runs at an angle to the lane (the SF Rush
+        // arcade's Sunset and The Heights), the lines across the road through neighboring spine points cross the lane in
+        // the wrong order and the lane stepped back and forward again (turns of 150-180 degrees), which the drones took
+        // as a hairpin and wrecked at, every lap. The longest run of picks that only moves forward along the lane is kept;
+        // each pick out of it moves to the lane's place between the kept picks either side (by spine point), as does a
+        // point with no pick in a short gap (below). Picks already in order don't change. docs/custom_tracks.md#the-ai-path
+        {
+            const bool loop = segments == line.size();
+            std::vector<size_t> at;     // spine points with a pick, in order
+            std::vector<double> along;  // their picks along the lane, unwrapped round a loop
+            for (size_t i = 0; i < n; i++) {
+                if (std::isnan(picked_at[i])) continue;
+                double v = picked_at[i];
+                if (loop && !along.empty()) {
+                    while (v < along.back() - segments / 2.0) v += double(segments);
+                    while (v > along.back() + segments / 2.0) v -= double(segments);
+                }
+                at.push_back(i);
+                along.push_back(v);
+            }
+            // Longest non-decreasing subsequence of `along` (patience sorting with back links).
+            std::vector<size_t> tails, prev(along.size(), SIZE_MAX);
+            for (size_t k = 0; k < along.size(); k++) {
+                size_t lo = 0, hi = tails.size();
+                while (lo < hi) {
+                    size_t mid = (lo + hi) / 2;
+                    if (along[tails[mid]] <= along[k]) lo = mid + 1;
+                    else hi = mid;
+                }
+                if (lo > 0) prev[k] = tails[lo - 1];
+                if (lo == tails.size()) tails.push_back(k);
+                else tails[lo] = k;
+            }
+            std::vector<bool> keep(along.size(), false);
+            for (size_t k = tails.empty() ? SIZE_MAX : tails.back(); k != SIZE_MAX; k = prev[k]) keep[k] = true;
+            // Between two kept picks: the picks out of order, and spine points with no pick at all (the offset lane's
+            // place, beside AIPATH_main: off the lane where AIPATH_main kinks, as The Heights' does) when the kept picks
+            // are at most short_gap spine points apart.
+            constexpr size_t short_gap = 10;
+            std::vector<size_t> kept;
+            for (size_t k = 0; k < along.size(); k++) if (keep[k]) kept.push_back(k);
+            size_t moved = 0;
+            Vec3 first_moved{};
+            for (size_t m = 0; m + 1 < kept.size(); m++) {
+                size_t a = kept[m], b = kept[m + 1];
+                for (size_t i = at[a] + 1; i < at[b]; i++) {
+                    if (std::isnan(picked_at[i]) && at[b] - at[a] > short_gap) continue;
+                    double t = double(i - at[a]) / double(at[b] - at[a]);
+                    double v = along[a] + (along[b] - along[a]) * t;
+                    v = std::fmod(v, double(segments));
+                    if (v < 0) v += double(segments);
+                    size_t j = std::min(size_t(v), segments - 1);
+                    size_t jb = (j + 1) % line.size();
+                    float f = float(v - double(j));
+                    lane[i] = on_road(add(line[j], mul(sub(line[jb], line[j]), f)), spine[i].air);
+                    float s0 = ribbon.speed[j], s1 = ribbon.speed[jb];
+                    lane_speed[i] = std::isnan(s0) || std::isnan(s1) ? (f < 0.5f ? s0 : s1) : s0 + (s1 - s0) * f;
+                    lane_mode[i] = f < 0.5f ? ribbon.mode[j] : ribbon.mode[jb];
+                    if (!moved++) first_moved = lane[i];
+                }
+            }
+            if (moved) {
+                report.info(name + ": " + std::to_string(moved) + " points out of order or missed between others (first "
+                            "near " + fmt_pos(first_moved) + "); moved onto the lane in order.");
+            }
         }
         if (missed == n) {
             report.warning(name + " doesn't run beside AIPATH_main anywhere (within " + fmt_ft(gate_height) + " of its "
@@ -3462,7 +3578,25 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
             g.dir = mul(g.dir, -1.0f);
             if (g.at > 0) g.at = int((n - size_t(g.at) + 1) % n);
         }
-        write_path(back, back_lanes, target_speeds(back, false), back_gates, out.track.path_backward);
+        // The forward race's authored speeds (AIPATH_main's _SPEED and painted lanes'), the slowest of them at each
+        // point, cap the backward race there: a corner, crest or drop is taken no faster either way, and the braking
+        // pass below brakes for them from the other side (the forward race's braking zone ends up after the corner,
+        // which only costs a little time). Without it the backward race took the radius table's speeds alone: on the
+        // arcade courses 20-45 mph over the arcade's own speeds for the same road, up to 158 mph over crests, and the
+        // drones slid wide and rolled (Market 43 crashes a race backward, Sunset 34, Metro 34; docs/sfrush_arcade.md#checks).
+        std::vector<float> ceiling(n, std::nanf(""));
+        for (size_t i = 0; i < n; i++) {
+            size_t f = (n - i) % n;
+            float c = spine[f].speed;
+            for (size_t k = 0; k < 4; k++) {
+                if (f < lane_ai.speed[k].size() && !std::isnan(lane_ai.speed[k][f])) {
+                    c = std::isnan(c) ? lane_ai.speed[k][f] : std::min(c, lane_ai.speed[k][f]);
+                }
+            }
+            ceiling[i] = c;
+        }
+        write_path(back, back_lanes, target_speeds(back, false, &ceiling),
+                   back_gates, out.track.path_backward);
         for (size_t k = 0; k < 4; k++) out.track.demo_starts[0].push_back(int16_t(k * n / 4));
         for (size_t k = 0; k < 4; k++) out.track.demo_starts[1].push_back(int16_t(k * n / 4));
         out.checkpoints = int(gates.size()) - 1;
@@ -3531,12 +3665,13 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
     // only), turned half a turn so the face toward Blender's front view (-Y) is the one the camera sees: the game shows
     // the model's -z side. Billboards of the same mesh and scale share a model.
     // Props likewise, in their node's frame without the half turn, drawn at the node's rotation.
-    struct BillboardModel { std::string name; std::vector<VisualTri> tris; Section section; };
-    // prop: PropRecord::type, 0 = a plain billboard; card: drawn as a camera card (a billboard, or a prop with the
+    // behaviour: a prop model's (its class's, prop_classes), 0 for a billboard's.
+    struct BillboardModel { std::string name; std::vector<VisualTri> tris; Section section; uint16_t behaviour = 0; };
+    // prop: prop_classes index, 0 = a plain billboard; card: drawn as a camera card (a billboard, or a prop with the
     // custom property billboard = true, which flies off still facing the camera).
     struct Billboard { size_t model; Vec3 pos; Vec3 axes[3]; int prop = 0; bool card = true; };
     std::vector<BillboardModel> billboard_models;
-    std::vector<Billboard> billboards;
+    std::vector<Billboard> billboards, props;   // props: the PROP_ objects, placed as breakable records (below)
     std::vector<std::pair<int, const rush2::gltf::Node*>> placed_nodes;
     for (const auto* n : billboard_nodes) placed_nodes.push_back({ 0, n });
     placed_nodes.insert(placed_nodes.end(), prop_nodes.begin(), prop_nodes.end());
@@ -3582,13 +3717,14 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
                 key.append((const char*)&t.material, sizeof(t.material));
             }
             key.push_back(card ? 'B' : 'P');
+            key.push_back(char('0' + prop));     // a model carries its class's behaviour id
             auto [it, added] = model_of.try_emplace(key, billboard_models.size());
             if (added) {
                 char nm[32];
                 snprintf(nm, sizeof(nm), "%s%c%03zu", prefix.c_str(), prop ? 'P' : 'B', billboard_models.size());
-                billboard_models.push_back({ nm, std::move(tris), {} });
+                billboard_models.push_back({ nm, std::move(tris), {}, prop_classes[prop].behaviour });
             }
-            billboards.push_back({ it->second, o, { ax[0], ax[1], ax[2] }, prop, card });
+            (prop ? props : billboards).push_back({ it->second, o, { ax[0], ax[1], ax[2] }, prop, card });
             billboard_count += !prop;
         }
         if (far) {
@@ -3597,10 +3733,6 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
         }
         if (billboard_count) {
             report.info("Billboards: " + std::to_string(billboard_count) + " BILLBOARD_ objects; they turn to face the camera.");
-        }
-        if (billboards.size() > billboard_count) {
-            report.info("Props: " + std::to_string(billboards.size() - billboard_count) + " PROP_ objects (they react to "
-                        "cars when the Rush 2049 ROM is set in the Games tab).");
         }
     }
     if (vtris.empty() && !collision_nodes.empty()) {
@@ -3831,6 +3963,44 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
     if (!extra_records.empty()) {
         report.info(std::to_string(extra_records.size()) + " collectible(s) of the course placed.");
     }
+    // The props: a breakable record each (<class>P<n>), placed with the collectibles, whose class's model lookup draws
+    // the prop's model (ConvertedTrack::record_models). A card prop's record has the camera card flag.
+    std::vector<rush2::track_mod::Extras::Record> prop_records;
+    std::set<const rush2::track_mod::Extras::Record*> card_records;
+    {
+        size_t room = max_breakables > extra_records.size() ? max_breakables - extra_records.size() : 0;
+        if (props.size() > room) {
+            report.warning(std::to_string(props.size()) + " PROP_ objects: Rush 2 holds " + std::to_string(max_breakables) +
+                           " breakables" + (extra_records.empty() ? "" : " (the course's collectibles among them)") +
+                           ", so the last " + std::to_string(props.size() - room) + " aren't placed.");
+            props.resize(room);
+        }
+        std::map<int, size_t> per_class;
+        prop_records.reserve(props.size());
+        for (size_t i = 0; i < props.size(); i++) {
+            const Billboard& p = props[i];
+            rush2::track_mod::Extras::Record r;
+            char nm[32];
+            snprintf(nm, sizeof(nm), "%sP%zu", prop_classes[p.prop].record, i);
+            r.name = nm;
+            for (int k = 0; k < 9; k++) r.m[size_t(k)] = p.card ? ((k % 4) == 0 ? 1.0f : 0.0f) : p.axes[k / 3][k % 3];
+            for (int c = 0; c < 3; c++) r.pos[size_t(c)] = p.pos[size_t(c)];
+            out.track.record_models[r.name] = billboard_models[p.model].name;
+            prop_records.push_back(std::move(r));
+            if (p.card) card_records.insert(&prop_records.back());
+            per_class[p.prop]++;
+        }
+        for (const auto& r : prop_records) extra_records.push_back(&r);
+        if (!props.empty()) {
+            std::string b = "Props: " + std::to_string(props.size()) + " PROP_ objects, Rush 2's own breakables (";
+            bool first = true;
+            for (const auto& [k, n] : per_class) {
+                b += (first ? "" : ", ") + std::to_string(n) + " " + prop_classes[k].what + (n == 1 ? "" : "s");
+                first = false;
+            }
+            report.info(b + ").");
+        }
+    }
 
     // ---- geometry container (docs/rush2049_research/geometry.md section 2) ----
     std::vector<uint8_t>& g = out.track.geometry;
@@ -3969,8 +4139,30 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
         m.cmd(0xFC121824, 0xFF33FFFF);          // TEXEL0 x SHADE
         m.cmd(0xD9FEFFFE, 0x00000000);          // G_ZBUFFER, G_FOG off
         m.cmd(0xD7000002, 0xFFFFFFFF);
-        emit_mesh(stris, all, used_materials, draw_materials, Vec3{}, unit,
-                  [&](MeshList& ml, size_t mi) { ml.cmd(0xDE000000, load_lists[mi]); }, m, sky_opaque, sky_cutout, sky_blend, false);
+        auto sky_load = [&](MeshList& ml, size_t mi) { ml.cmd(0xDE000000, load_lists[mi]); };
+        // Drawn without depth, so the order is what covers what. A sky whose materials each come as one run of
+        // triangles is drawn by material, in the order they first appear (docs/custom_tracks.md#your-own-sky). One
+        // that comes back to a material after another (the SF Rush arcade's distant land and cloud strips, sorted back
+        // to front by src/arcade2049/arcade_track.cpp) is drawn in its triangle order, a run of one material at a time.
+        std::vector<std::vector<int>> runs;
+        std::vector<int> run_materials;
+        bool interleaved = false;
+        for (size_t i = 0; i < stris.size(); i++) {
+            if (runs.empty() || stris[i].material != stris[size_t(runs.back().front())].material) {
+                if (std::find(run_materials.begin(), run_materials.end(), stris[i].material) != run_materials.end()) interleaved = true;
+                run_materials.push_back(stris[i].material);
+                runs.emplace_back();
+            }
+            runs.back().push_back(int(i));
+        }
+        if (!interleaved) {
+            emit_mesh(stris, all, used_materials, draw_materials, Vec3{}, unit, sky_load, m, sky_opaque, sky_cutout, sky_blend, false);
+        }
+        else {
+            for (const std::vector<int>& run : runs) {
+                emit_mesh(stris, run, used_materials, draw_materials, Vec3{}, unit, sky_load, m, sky_opaque, sky_cutout, sky_blend, false);
+            }
+        }
         m.cmd(0xD9FFFFFF, 0x00010001);          // G_ZBUFFER, G_FOG back on
         m.cmd(0xE3000A01, 0x00100000);          // 2-cycle
         m.cmd(combine[0], combine[1]);
@@ -4126,10 +4318,10 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
         const Section* sec = names[i] == "SKYO1" && (!stris.empty() || stock_sky_model) ? &sky_model : nullptr;
         for (const Section& s : sections) if (s.name == names[i]) sec = &s;
         for (const Mover& mv : movers) if (mv.model == names[i]) sec = &mv.section;
-        for (const BillboardModel& bm : billboard_models) if (bm.name == names[i]) sec = &bm.section;
+        uint16_t behaviour = 0;                      // a plain model
+        for (const BillboardModel& bm : billboard_models) if (bm.name == names[i]) sec = &bm.section, behaviour = bm.behaviour;
         if (finish_model.list && names[i] == prefix + "FINISH") sec = &finish_model;
         if (!seatris.empty() && names[i] == "FILLSEA") sec = &sea_section;
-        uint16_t behaviour = 0;                      // a plain model
         for (const ExtraCopy& ec : extra_copies) {
             if (ec.section.name == names[i]) { sec = &ec.section; behaviour = ec.behaviour; }
         }
@@ -4179,16 +4371,6 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
         for (float f : pos) addf(pl, f);
         bool late = bm ? bm->section.late : !mv && !is_finish && sections[i].late;
         add32(pl, 0x40 | (late ? late_pass : 0) | ((bb && bb->card) || (mv && mv->card) ? camera_card : 0));
-        if (bb && bb->prop) {
-            rush2::track2049::PropRecord r{};
-            r.record = int(i);
-            r.type = bb->prop;
-            r.direction = 0;
-            memcpy(r.m, rm, sizeof(r.m));
-            memcpy(r.pos, pos.data(), sizeof(r.pos));
-            for (int k = 0; k < 9; k++) r.parent_m[k] = (k % 4) == 0 ? 1.0f : 0.0f;
-            out.track.prop_records.push_back(r);
-        }
         add16(pl, uint16_t(i + 1 < records ? int16_t(i + 1) : int16_t(-1)));
         auto child = first_child.find(int(i));
         add16(pl, !is_finish && !mv && !bb && child != first_child.end() ? uint16_t(child->second) : 0xFFFF);
@@ -4204,7 +4386,7 @@ bool rush2::track_mod::convert(const std::vector<uint8_t>& glb, const std::strin
             add_name(pl, r.name);
             for (float f : r.m) addf(pl, f);
             for (float f : r.pos) addf(pl, f);
-            add32(pl, 0x40);
+            add32(pl, 0x40 | (card_records.count(&r) ? camera_card : 0));
             add16(pl, uint16_t(j + 1 < kids.size() ? int16_t(first_child[s] + j + 1) : int16_t(-1)));
             add16(pl, 0xFFFF);
             add32(pl, 0);

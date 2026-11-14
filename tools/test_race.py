@@ -12,7 +12,7 @@ TRACK `menus` sets no race up: the game boots to the title and the --script driv
 data folder has no saved players). Otherwise TRACK is a track select id (0-11 Rush 2, 12-17 Rush 2049, 18-24 SF Rush, 25-28 stunt arenas, 29 obstacle course,
 30-37 battle arenas, 38-63 and 80-248 custom tracks, 64-79 California Speed, 249-254 the Rush 2049 race
 tracks' Dreamcast versions) or a custom track's folder name. --cars gives one
-car type per player (1-4 players; Rush 2 0-21, 2049 23-35, California Speed 36-56, mod cars 57-72). --script is the
+car type per player (1-4 players; Rush 2 0-21, 2049 23-35, California Speed 36-56, mod cars 57-120). --script is the
 --input-script (default: gas held from 1 s), counted from launch: the race is up about 5 s in. A time written
 T<seconds> counts from the title screen instead (menu scripts: the launch's length varies).
 
@@ -28,7 +28,7 @@ default; --turbo runs the race as fast as the machine goes from its first tick (
 The run is closed after --seconds (by its PID). race_watch.py does the watching: DIR/samples.jsonl, DIR/events.txt,
 DIR/run.log (the game's output).
 """
-import argparse, json, math, os, shutil, subprocess, sys, zipfile
+import argparse, json, math, os, shutil, subprocess, sys, time, zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -55,11 +55,19 @@ def link(src, dst):
 
 
 def remove_link(path):
-    """Removes a junction, link or linked file without touching what it points to."""
-    if os.path.isjunction(path) or os.path.islink(path):
-        os.rmdir(path) if os.path.isdir(path) else os.unlink(path)
-    elif os.path.isfile(path):
-        os.remove(path)
+    """Removes a junction, link or linked file without touching what it points to. A file still held for a moment
+    (the last run's game closing, a virus scan of a fresh copy) is retried for up to 10 s."""
+    for attempt in range(41):
+        try:
+            if os.path.isjunction(path) or os.path.islink(path):
+                os.rmdir(path) if os.path.isdir(path) else os.unlink(path)
+            elif os.path.isfile(path):
+                os.remove(path)
+            return
+        except PermissionError:
+            if attempt == 40:
+                raise
+            time.sleep(0.25)
 
 
 def mod_name(entry):
@@ -84,7 +92,7 @@ def set_options(name, pairs):
 USER_SETTINGS = ['graphics.json', 'general.json', 'cheats.json', 'circuit.json', 'npc_cars.json']
 
 
-def prepare_data(track, extra_mods, games=(), configs=(), mod_dirs=(), user_settings=False, no_mods=()):
+def prepare_data(track, extra_mods, games=(), configs=(), mod_dirs=(), user_settings=False, no_mods=(), no_roms=()):
     os.makedirs(DATA, exist_ok=True)
     for n in os.listdir(DATA):
         p = os.path.join(DATA, n)
@@ -94,7 +102,10 @@ def prepare_data(track, extra_mods, games=(), configs=(), mod_dirs=(), user_sett
             shutil.rmtree(p)
     for rom in ROMS:
         src, dst = os.path.join(BUILD, rom), os.path.join(DATA, rom)
-        if os.path.exists(src) and not os.path.exists(dst):
+        if rom in no_roms:
+            if os.path.exists(dst):
+                remove_link(dst)
+        elif os.path.exists(src) and not os.path.exists(dst):
             link(src, dst)
     if os.path.exists(os.path.join(BUILD, 'games.json')):
         shutil.copyfile(os.path.join(BUILD, 'games.json'), os.path.join(DATA, 'games.json'))
@@ -197,6 +208,8 @@ def main():
     ap.add_argument('--finish', type=float)
     ap.add_argument('--mod', action='append', default=[])
     ap.add_argument('--no-mod', action='append', default=[], help='an installed mod (its id) to leave off for the run')
+    ap.add_argument('--no-rom', action='append', default=[], choices=ROMS,
+                    help="a ROM file to leave out of the run's data folder (e.g. rush2049.z64: the game without Rush 2049)")
     ap.add_argument('--mod-dir', action='append', default=[], help='a mod folder to link in (or a .rtz to copy in), '
                     'in place of the installed mod with the same id (its mod.json id)')
     ap.add_argument('--out', default=os.path.join(REPO, 'tmp', 'test_race', 'out'))
@@ -232,7 +245,7 @@ def main():
         DATA = os.path.abspath(a.data)
     if a.records and not os.path.isfile(a.records):
         sys.exit('no placement file %s (the converted track: track_mod_test.exe output)' % a.records)
-    mods = prepare_data(a.track, a.mod, a.games, a.config, a.mod_dir, a.user_settings, a.no_mod)
+    mods = prepare_data(a.track, a.mod, a.games, a.config, a.mod_dir, a.user_settings, a.no_mod, a.no_rom)
     if a.saves:
         os.makedirs(os.path.join(DATA, 'saves'), exist_ok=True)
         for n in os.listdir(a.saves):

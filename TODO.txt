@@ -12,12 +12,16 @@ General:
       on that port; no profile pick or Create Player for them, and the post-race records and name entry (game state 6,
       func_800A952C, 2 player arrays: docs/players4.md) are players 1 and 2's.
 3) Higher drone difficulty levels
-4) Separate drone difficulty from checkpoint difficulty as an option
-5) The ability to save/load vehicle tuning setups by name
-7) Dynamic Car Lights on night courses
+4) The ability to save/load vehicle tuning setups by name
 
 California Speed:
 1) Post-race records on point-to-point tracks: average lap and best lap are the same one-lap time (the whole run);
     consolidate them into one race-time page there (post-race screen and the menu's RECORDS screen), keeping or
     migrating times already saved.
 2) Optionally convert California speed custom RGB paint system
+
+strange mismatch between top of dome and sides of sky dome downtown arcade with fog. have seen often on sky domes. they should look smooth "C:\Users\Bryant\Pictures\Screenshots\Screenshot 2026-11-13 002645.png"
+2049 wall I can go right through metro arcade (see "C:\Users\Bryant\Pictures\Screenshots\Screenshot 2026-11-13 003345.png")
+https://github.com/bryantmh/rush2recompiled/issues/69
+SF Rush arcade: maybe add the 5 N64 keys the arcade marks with its own Atari cube but our floor test drops (Heights KEY1-2, Sunset KEY6-8; tools/arcade_collectibles.py notes them)
+New mode idea: Knockout. It's a multilap race, at the end of each lap the person in last place is eliminated. Either their car is stopped or explodes.

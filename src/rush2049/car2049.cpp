@@ -5,7 +5,7 @@
 // tools/rush2049/cartypes.py) points every instruction that addresses them at copies for every type at 0x80200000
 // (include/car_types.h) and re-strides the row arithmetic from 22 to 73. This file builds the copies at boot: Rush 2's
 // entries, the "no car" marker type 22, then the 2049 cars' (types 23-35); California Speed's (36-56) are filled by
-// src/calspeed/calspeed_cars.cpp and the mod cars' (57-72) by set_mod_car (src/car_mods.cpp).
+// src/calspeed/calspeed_cars.cpp and the mod cars' (57-120) by set_mod_car (src/car_mods.cpp).
 
 #include <cstdio>
 #include <algorithm>
@@ -47,6 +47,7 @@
 #include "online.h"
 #include "online_sync.h"
 #include "rush2049_dc.h"
+#include "dc_translucent.h"
 #include "unlocks.h"
 #include "track2049_convert.h"
 #include "track_cache.h"
@@ -1720,6 +1721,7 @@ void rush2::car2049::set_mod_car(uint8_t* rdram, int n, std::vector<uint8_t> car
     mod_schemes[n] = spec.schemes;
     mod_no_wheels[n] = spec.wheels_hidden;
     mod_shadow_radius[n] = spec.shadow_radius;
+    rush2::car_lights::set_mod_lamps(rush2::car_types::first_mod + n, spec.lamps);
     mod_no_wings[n] = spec.wings_hidden;
     mod_no_marks[n] = spec.marks_hidden;
     mod_no_dust[n] = spec.dust_hidden;
@@ -1746,6 +1748,7 @@ void rush2::car2049::clear_mod_car(uint8_t* rdram, int n) {
     mod_game[n] = int(ModGame::Custom);
     mod_no_wheels[n] = false;
     mod_shadow_radius[n] = 0.0f;
+    rush2::car_lights::set_mod_lamps(type, {});
     mod_no_wings[n] = false;
     mod_no_marks[n] = false;
     mod_no_dust[n] = false;
@@ -2268,6 +2271,13 @@ int rush2::car2049::paint_jobs(int type) {
     return k >= 0 && k < car_count ? (int)paints[k].job_rgb.size() : 0;
 }
 
+bool rush2::car2049::paint_job_color(int type, int main, uint32_t& rgb) {
+    int k = type - first_type;
+    if (rush2::car_types::is_mod(type) || k < 0 || k >= car_count || paints[k].job_rgb.empty() || main < 0) return false;
+    rgb = paints[k].job_rgb[size_t(main) % paints[k].job_rgb.size()];
+    return true;
+}
+
 std::map<uint32_t, uint32_t> rush2::car2049::scuffed_texels(int k) {
     std::map<uint32_t, uint32_t> out;
     if (k < 0 || k >= car_count) return out;
@@ -2436,6 +2446,13 @@ void rush2::car2049::swap_player_rows(uint8_t* rdram, int a, int b) {
     }
 }
 
+// race_scene_load_assets_8008A1FC at 0x8008A2D4, on the car select, after it stored the base of the cars' part
+// matrices (0x8011921C, 8 per preview id): their own room for every preview id (include/car_types.h preview_matrices).
+extern "C" void rush2_preview_matrix_base(uint8_t* rdram, recomp_context* ctx) {
+    (void)ctx;
+    MEM_W(0, (int32_t)0x8011921C) = (int32_t)rush2::car_types::preview_matrices;
+}
+
 // func_803B81F0 at 0x803B873C, after it listed a player's selectable Rush 2 cars: $a1 = player. The 2049 cars
 // follow them (Unlock All Cars, src/cheats.cpp, rebuilds the list afterwards and appends them again).
 extern "C" void rush2_car49_list(uint8_t* rdram, recomp_context* ctx) {
@@ -2552,7 +2569,8 @@ namespace {
         // Before version 7 they ended at the 2049 types: California Speed's blocks start fresh (init_side_slot).
         // Version 7 gave every California Speed car TIRE SIZE 1.0 (byte 25), not its own wheel scale: a block still on
         // it takes the car's own. Before version 9 they ended at California Speed's types: the mod cars' blocks
-        // (57-72) start fresh, as any block past a slot's saved bytes does.
+        // (57-120) start fresh, as any block past a slot's saved bytes does (so do mod slots 17-64, types 73-120, past
+        // a save from before there were 64).
         bool old_calspeed_tires = version < 8;
         // Version 9 started the mod cars' TIRE SIZE at 0.75 (bytes 0), and version 10 gave the blocks of slots not yet
         // filled the Pickup's 1.25. Before version 11 nothing says which mod a block was made for ("?"): once its mod
@@ -3500,13 +3518,16 @@ void rush2::car2049::brake_light_sources(uint8_t* rdram, int car, BrakeLightSour
             if (d.lit_damaged != 0 && d.damaged != 0) out.lit_copies.push_back({ base + d.damaged, base + d.lit_damaged });
         }
         for (const auto& [texels, lit] : p->tail_lit) out.lit_bytes.push_back({ base + texels, lit });
-        for (const Paint::BrakeBlock& b : p->brake_blocks) out.lists.push_back(base + b.list);
+        for (const Paint::BrakeBlock& b : p->brake_blocks) out.lists.push_back(base + b.list), out.switches.push_back(base + b.at);
     }
     uint32_t livery_base = 0;
     if (int livery = rush2::car_mods::livery_body(rdram, car, livery_base); livery >= 0) {
         std::lock_guard lock{ livery_mutex };
         if (livery < (int)livery_bodies.size()) {
-            for (const Paint::BrakeBlock& b : livery_bodies[livery].brake_blocks) out.lists.push_back(livery_base + b.list);
+            for (const Paint::BrakeBlock& b : livery_bodies[livery].brake_blocks) {
+                out.lists.push_back(livery_base + b.list);
+                out.switches.push_back(livery_base + b.at);
+            }
         }
     }
 }
@@ -3550,7 +3571,7 @@ extern "C" void rush2_car49_select_set(uint8_t* rdram, recomp_context* ctx) {
 extern "C" void rush2_car49_select_cursor(uint8_t* rdram, recomp_context* ctx) {
     uint32_t at = (uint32_t)ctx->r4;
     int type = (int)(ctx->r2 & 0xFF);
-    // Test aid: RUSH2_TEST_CAR=<type> (Rush 2 0-21, 2049 23-35, California Speed 36-56, mod cars 57-72) opens the car
+    // Test aid: RUSH2_TEST_CAR=<type> (Rush 2 0-21, 2049 23-35, California Speed 36-56, mod cars 57-120) opens the car
     // select on that car, whatever the save chose.
     static const char* test_car = std::getenv("RUSH2_TEST_CAR");
     if (test_car != nullptr && std::atoi(test_car) >= 0 && std::atoi(test_car) < types && std::atoi(test_car) != 22) {
@@ -4215,6 +4236,7 @@ void rush2::car2049::sheen_model(uint8_t* rdram, recomp_context* ctx) {
 // func_8007C624 entry: a new view.
 extern "C" void rush2_car49_flames_view_begin(uint8_t* rdram, recomp_context* ctx) {
     queued_flames.clear();
+    rush2::dc_translucent::view_begin();
     light_tables_built = false;
     sheen_tables_built = false;
 }
@@ -4286,6 +4308,8 @@ void emit_queued_flames(uint8_t* rdram, uint32_t cursor_ptr) {
 
 // func_8007C624 at L_8007D980, after the world-space polygons: draws the queued flames. $s6 = display list cursor.
 extern "C" void rush2_car49_flames_draw(uint8_t* rdram, recomp_context* ctx) {
+    // Dreamcast models' translucent strips first (src/rush2049dc/dc_translucent.cpp): both blend over what's drawn.
+    rush2::dc_translucent::emit(rdram, (uint32_t)ctx->r22);
     if (!queued_flames.empty()) {
         emit_queued_flames(rdram, (uint32_t)ctx->r22);
     }
@@ -4298,7 +4322,7 @@ extern "C" void rush2_car49_flames_draw(uint8_t* rdram, recomp_context* ctx) {
 // next polygon sets them again, and the flames' 2-cycle fog state is undone when the loop has 1-cycle without fog
 // (sp+0x164 = 0, set by flag 0x100 polygons).
 extern "C" void rush2_car49_flames_before_poly(uint8_t* rdram, recomp_context* ctx) {
-    if (queued_flames.empty()) {
+    if (queued_flames.empty() && !rush2::dc_translucent::pending()) {
         return;
     }
     // race_countdown_sign_8010C040, moved here for four views (src/players4.cpp): a polygon pointer per view.
@@ -4312,7 +4336,10 @@ extern "C" void rush2_car49_flames_before_poly(uint8_t* rdram, recomp_context* c
         return;
     }
     uint32_t cursor_ptr = (uint32_t)ctx->r22;
-    emit_queued_flames(rdram, cursor_ptr);
+    rush2::dc_translucent::emit(rdram, cursor_ptr);
+    if (!queued_flames.empty()) {
+        emit_queued_flames(rdram, cursor_ptr);
+    }
     uint32_t sp = (uint32_t)ctx->r29;
     MEM_W(0x168, (int32_t)sp) = -1;
     MEM_W(0, (int32_t)0x80112470) = 0;

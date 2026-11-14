@@ -873,7 +873,7 @@ extern "C" void rush2_cheats_kill_floor(uint8_t* rdram, recomp_context* ctx) {
         return;
     }
     int32_t car = MEM_W(0x138, ctx->r29);
-    if (MEM_BU(car_kind, car) == 2) {
+    if (MEM_BU(0, (int32_t)(car + car_kind)) == 2) {
         ctx->r3 = 0;
     }
 }
@@ -893,7 +893,7 @@ extern "C" int rush2_cheats_no_damage(uint8_t* rdram, uint32_t car) {
     if (index >= 8 || offset % car_physics_size != 0) {
         return -1;
     }
-    if (MEM_B(car_kind, (int32_t)car) == 2 && MEM_B(0, (int32_t)invincible) != 0) {
+    if (MEM_B(0, (int32_t)(car + car_kind)) == 2 && MEM_B(0, (int32_t)invincible) != 0) {
         return 1;
     }
     if (MEM_B(0, (int32_t)no_damage) == 0) {
@@ -940,7 +940,9 @@ extern "C" void rush2_cheats_car_list(uint8_t* rdram, recomp_context* ctx) {
     rush2::npc_cars::set_offered_cars(offered);
     // Grouped by game (game_filter::display_rank: SF Rush, Rush 2, Rush 2049, California Speed, custom), each game's
     // cars in the order they were listed. The game lists Rush 2's own first, so the PlayStation SF Rush cars move ahead.
-    for (int p = 0; p < players; p++) {
+    // The UNLOCKS shop's list stays in the shop's order: it moves the carousel by its own index (src/unlocks_shop.cpp
+    // scroll_carousel), so a sorted list showed other cars than the named one and slid the wrong way on the first move.
+    for (int p = 0; p < players && rush2::unlocks::shop_car() < 0; p++) {
         int size = std::min<int>((int16_t)MEM_H(2 * p, (int32_t)car_list_size), rush2::car2049::types);
         std::vector<int> types;
         for (int i = 0; i < size; i++) types.push_back(MEM_BU(0, (int32_t)(car_list + 2 * i + p)));

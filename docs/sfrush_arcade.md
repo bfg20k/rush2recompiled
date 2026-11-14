@@ -93,14 +93,30 @@ tracks 1-3) and its extents to the foot (4963 x 8967 ft against 4962 x 8966 on G
   eight panels about 28,000 ft out, plus `CLOUDS`. `SKYSIDE`, `SKYBOTT` and `SKYSCR` are skyscraper walls. 2049's
   far-object rules apply with a 12,000 ft radius for all but water (2049: 9,000): Market's road and trees reach 9,138
   ft and Embarcadero's signs 9,406, while the backdrops (Market's hills `TP_` 12,190-22,743 ft, Embarcadero's Marin hills
-  and bay 16,440-18,698, The Rock's distant land `APANS_01`-`16`) go to the sky. Sky draw order: dome, water, every
-  other sky object (distant land), clouds. An object is sky by its textures only when every triangle has a sky
+  and bay 16,440-18,698, The Rock's distant land `APANS_01`-`16`) go to the sky. Sky draw order: dome, water, then the
+  distant land and cloud strips back to front, triangle by triangle (2026-11-13). The sky has no depth test, and drawn a
+  material at a time Embarcadero's far skyline strip (`CLOUDS2`) painted over the Marin hills' tips and a hill's
+  cliff face went behind its own slope (the arcade draws them with depth). Each triangle's key is its nearest corner's
+  distance across the ground (the sky is always centered on the camera; the triangle's middle got the cliff wrong),
+  and land below the water's height is cut off so the bay stays in front of the hills' feet. The order is kept by
+  the mod converter, which draws a sky that comes back to a material in its triangle order
+  (`track_mod_convert.cpp`; skies whose materials each come as one run are drawn as before). Checked against a
+  depth-tested render all the way round with `tools/glb_view.py --no-depth` (draws a glb in file order, as the game
+  draws a SKY mesh). An object is sky by its textures only when every triangle has a sky
   texture: Market's TEMPL1966 (a block of road and shop fronts at about (-5400, 0) with four `SKYTOP1` triangles under
   the road) and TEMPL880 (concrete and side road at (-2300, 2500) with a small box of `SKY00A`-`03A` and `SKYTOP1`)
   were taken whole into the sky and drew floating overhead, leaving a hole in the street (2026-11-07); they stay
   scenery, their sky panels drawn in place. Downtown, The Heights and Sunset have no dome in their data (nor in
   `STATIC` or `REFLECT`): they get `sky = "clouds"`, the N64 version's dome. All seven take SF Rush's fog color
   0x9696BE (`fog_color`, as the N64 port's).
+- **Far scenery and the far plane (2026-11-13):** Embarcadero's Marin hills seen from the waterfront are not sky but
+  three flat shore panels in the scenery (`SHORE2F`, `SHORE3_2`, `SHORE3_3`, 1,500-2,100 m out, up to 9 degrees up).
+  At FOG 1 these tracks have no fog (`rush2::sky_fog::fog_removed`), and the far plane (2,000 ft x the Draw Distance)
+  sliced the panels along a straight line that moved as the camera turned, leaving a wedge of sky under the cut; at
+  the Original draw distance they were gone. On a converted course without fog the reach is now the whole course
+  (`reach_scale` in src/draw_distance.cpp: far plane, object cull distance, float matrices and every section at 40,000
+  ft), as the arcade draws it; LOD keeps the Draw Distance setting. Checked in game at two headings 10 degrees apart
+  and at the Original draw distance (`RUSH2_CS_PLACE=-500,3,-312,-0.766,-0.643,0,1`, backward grid facing the bay).
 - **Water:** `WATER2` sheets become `COL_WATER` as on 2049, but only at sea level (every corner at 5 ft or below: the
   sheets lie at -10 to 0 ft): a raised one on The Rock (61-64 ft) has lane points passing under it. `WATER2A` stays
   scenery as on 2049. Golden Gate 45, Embarcadero 356, The Rock 447 water triangles.
@@ -130,9 +146,70 @@ tracks 1-3) and its extents to the foot (4963 x 8967 ft against 4962 x 8966 on G
   for the watched car and 0.5 ft for the others (table 0x140623970), left out when its wheels' heights differ by
   over 8 ft, its alpha from their average height; the quads go to its Vulkan renderer through 0x14017D0F0 /
   0x14017D5E0, and it never calls vkCmdSetDepthBias. How its renderer keeps the road from cutting it is not found.
+- **Key markers:** TRACK5-7 (Downtown, The Heights, Sunset) place small cubes drawn only in the ATARI5 logo (10
+  triangles, 7, 8 and 8 of them) through worlds.rom, each at an N64 key's spot (all 23 match one, within a foot; the
+  5 at keys the arcade_collectibles.py floor test drops too). They are the arcade's own pickups and are left out, as
+  the 2049 arcade's coins are; the SF Rush keys go there instead (arcade2049.md#coins-and-keys-on-the-arcade-versions).
+  ATARI5 also shows on signs on TRACK1 and TRACK3, which have other textures and stay.
+- **Finish banner:** every track has a banner drawn in CHKPOINT 19-203 ft from its lap line ('F' in rock_gates), and no
+  placed object uses its FINISH texture (256 x 64; Market's 128 x 32): the arcade puts FINISH on the banner for the last
+  lap. The converter makes that banner's CHKPOINT faces the custom track's FINISH_BANNER (a CHKPNT material) with
+  FINISH's image (scaled to CHKPOINT's size) as the FINISH material (custom_tracks.md#finish-banner), as the PS1 tracks
+  do. Checked in game with `RUSH2_TEST_RACE_FINISH_BANNER=1` (Downtown, Market).
+- **Breakables:** see [Breakables](#breakables).
 - The exe's table of 84 TEMPL names at 0x1406F4798 (per track: 64, 19, 1 names with value 0x20, placed through
   0x1402C4930 with that flag at the object record's +4) is not the road: only 7 of Golden Gate's 51 road objects
   are in it.
+
+## Cracks and curbs
+
+The Rock's models leave holes the sky shows through (reported 2026-11-13 on Embarcadero, under the overpass on the
+climb at about (-1180, 143, 2130-2520) game ft). They are in the arcade data itself: the converted glb's vertices match
+`objects.rom` to 1e-5 and keep every triangle, and the game's 1/16 ft vertex rounding added 0-3 pixels in offline
+renders. Embarcadero (TRACK2), counted on its 28,407 placed triangles:
+- **Curbs with no face:** the sidewalks (SIDWOKBRIK) rise up to 0.5 ft over the road (6LNROAD3) with nothing under
+  their edge, so a wedge of sky runs along the curb.
+- **T-junctions:** 3,165 open edges have another piece's corner on them (the road and sidewalks worst); drawn, they
+  sparkle.
+- **Seams:** 1,151 open edges miss the edge beside them by 0.002-0.2 ft (the ramp top at z 2220, 0.16-0.2 ft).
+
+`close_scenery_seams` (src/arcade2049/arcade_seams.cpp), on the opaque TRACK faces of the Rock tracks only (Rush
+2049's arcade tracks are left as they are):
+1. A vertical face, both sides, with the upper face's texture, between two open edges of ground faces on one line
+   seen from above (0.05 ft), on opposite sides of it, 0.04-1 ft apart in height, over the 0.5 ft or more they share.
+2. Open corners within 0.2 ft snap together, unless they are corners of one triangle (then 0.04 ft), so thin strips
+   and open pole ends keep their width. "Same object" can't be the test: shared corners join the whole track.
+3. An open edge with an open corner on it (0.04 ft, or 0.2 ft when the corner is outside the edge's triangle and has
+   an open edge of its own alongside) is split there at the corner's position; the triangle is redrawn as a fan round
+   its center.
+
+Embarcadero: 416 curb faces, 602 corners snapped, 1,598 edges split (26,771 -> 32,931 triangles); opaque T-junction
+edges 3,623 -> 18, seams under 0.16 ft 550 -> 53. What is left is mostly 0.4-0.8 ft apart: separate features, not
+cracks. Offline renders along the lap (sky in magenta, tools/glb_view.py --eye ... --cull 1) showed no new hole.
+
+## Breakables
+
+The arcade draws N64 SF Rush's knock-over objects as plain scenery that stands still: its cone, parking meter and
+traffic light models and its single tree cards stand where the N64 courses place their cones, meters, traffic lights,
+trees and trash munchers, mostly within 0.1-0.5 ft (`tools/arcade_props.py` lists them). The converter
+(`breakable_kind` in src/arcade2049/arcade_track.cpp) makes every placement of those objects a prop, Rush 2's own
+breakable as on the N64 courses (src/rush1/track1_convert.cpp; custom_tracks.md#props), its origin at its foot:
+
+| Arcade object | Rule | Prop | Rush 2 class (as the N64's) |
+|---|---|---|---|
+| cone | texture RED, 19 triangles, under 6 ft | `PROP_KNOCK_` | CONE1 |
+| parking meter | PARKMETER, under 8 ft | `PROP_METER_` | METER |
+| traffic light | SIGNAL3, under 25 ft tall and 6 ft across | `PROP_TIP_` | CURVEHIT (the N64's PMUNCH) |
+| tree | one of T1_TREE1, 4, 5, 9A, DECID2, DECID2A, JUNIMED4 (the textures at N64 tree and muncher spots), at most 8 triangles, 8-70 ft tall, at most 60 ft across | `PROP_TREE_` | TREEHIT |
+
+Matched by object, not by spot: Market and Downtown place twice as many meters as the N64 (48 and 24, against 26 and
+12 at N64 spots), Sunset 11 meters away from the N64's, and The Rock 74 small trees where the N64 has cones. Tree
+clumps and rows (more triangles, wider) stay scenery. Counts: Golden Gate 38 trees; Embarcadero 78 cones, 15
+traffic lights, 9 trees; Market 48 meters, 15 trees; Downtown 24 meters, 21 trees; The Heights 14 cones, 5 meters, 1
+tree; Sunset 11 meters, 5 trees; The Rock 74 trees (at most 102 a track, under Rush 2's 130 with the keys). The N64's
+flags, fences, windows and gas sign have no arcade object that comes apart in pieces, so they stay scenery. Like the
+N64 courses, the arcade versions take SF Rush's hit test (src/rush1/track1.cpp `rush2_track1_breakable_hit`). Checked in
+game 2026-11-13 (Embarcadero cones and traffic light, Market meter and tree, cones also without the Rush 2049 ROM).
 
 ## Gates
 
@@ -217,11 +294,27 @@ up by R[13] a block; release fades by R[16] a block, or without one the sample j
 (0x14024AA20) pans by the lobe: left = g(a + 0xC0) + 0.707 g(a + 0x140), right = g(a + 0x40) + 0.707 g(a + 0x1C0), a the pan
 angle (512 a turn). Its output level also goes through ProjectR's own volume table (0x1406EA51C, by its game_volume
 setting), so the port levels the songs by loudness instead: -4.95 LUFS as synthesized, turned down 11.15 dB to Rush 2's
--16.1 (`rock_music_compensation`).
+-16.1 and doubled for the output's halving (`file_song_makeup`, include/audio2049.h): a gain of 0.554
+(`rock_music_compensation`).
 
 ## Checks
 
 All seven pass `tools/track_mod_test.bat` and `tools/track_mod_check.py` (every lane point has ground in its index
 cell, every placement its model). Left as warnings: lanes that take an alternate route for a stretch (Golden Gate's
 fourth, Embarcadero's fourth, The Rock's first) are offset from the main path there, and Sunset's lap sits up to 11 ft
-off its road at 6 points (dropped onto it). The Rush 2049 arcade mods build byte for byte as before these rules.
+off its road at 6 points (dropped onto it).
+
+**Race audit (2026-11-13, `tools/drone_pace.py --race ... --wrecks --lost-laps`, 3 laps, 7 drones):** those alternate
+routes are the arcade's own data, not a misread: dpath table 7 on Golden Gate (TRACK1) and Embarcadero (TRACK2) and
+tables 2 and 5 on The Rock (TRACK4) leave table 0 by up to 664, 396 and 194 ft. No N64 lane goes there (the N64's four
+run 130-230 ft away on average), so they are shortcut lines Rush The Rock added. In the converted track they run along
+strips outside the road's walls and cut back through a wall (Embarcadero, (1101, 975) to (1103, 2097): lane 4 crosses
+the wall back onto the road; (1200, 2900-3120): it zigzags across the wall line 96-124 ft up with no ground under it). Every wreck of
+the drones on that lane (cars 1 and 5) is on those stretches: 37 of 37 on Embarcadero and 29 of 30 on Golden Gate.
+Separately, on The Heights (TRACK6) all seven racing lines leave table 0 by up to 149 ft at its records 97-136 (the
+spot with 41 wrecks a race), and on Sunset (TRACK7) table 0 has a 63 ft kink at record 840 that every line skips (21
+wrecks forward, 48 backward): there table 0, which becomes `AIPATH_main` and sets the target speeds, is the odd one out.
+
+**Fixed (2026-11-13):** the converter leaves out shortcut lines most racing lines don't take and moves table 0 onto the lines where every line is more than 45 ft off it (docs/arcade2049.md#dpathrom-the-drones-paths), and the custom track converter keeps painted lanes in order along the lane (docs/custom_tracks.md#the-ai-path): The Heights' and Sunset's real wreck spots were lanes stepping back and forward again (turns of 150-180 degrees) where AIPATH_main's cross lines met them out of order. Forward wrecks a race after the fixes (before): Embarcadero 1 (37), Golden Gate 4 (30), The Rock 4 (17), Sunset 5 (38), The Heights 22 (60, all now finish), Downtown 6 (6), Market 9 (12); Rush 2049 Haight 0 (12). Left: Rush 2049 Metro (114: drones reach a right-angle corner at (4650, 600) at the arcade lane's 142 mph and roll; a U-turn at (5500, 0) over a small wall block) and every backward race (the arcade had mirror tracks, not backward ones).
+
+**Backward speeds and hand fixes (2026-11-13):** backward races now keep the forward race's authored speeds as a ceiling (docs/custom_tracks.md#the-ai-path); arcade backward crashes a race: Sunset 34 -> 7, Mission 15 -> 0, The Heights 22 -> 9, Market 43 -> 27, Downtown 10 -> 5, The Rock 12 -> 8, Marina 18 -> 13. A hand fix in `build_one` (`line_fixes`): Embarcadero's tables 1-2 move 8 ft off the tip of a wedge of wall at (-3967, -320) before the finish (backward 30 -> 2 crashes, all finish). Rush 2049 Metro's crashes (36-40 forward, 30-32 backward) are start pile-ups and lone hits at speed along (5720, 229) to (6226, -256), where the course's trolley `MOVE_T4MTROLLEY` runs (not confirmed); a cap of 80 mph on its right angle at (4583..4633, 417-477), taken at 141-147, changed nothing and was reverted. The Rush 2049 arcade mods build byte for byte as before these rules.

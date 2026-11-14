@@ -72,8 +72,10 @@ set of enabled mods changes) read the glbs and build a Rush 2 car container per 
   classes 0x800C5670), sized by its aspect: 64x32, 32x64 or 32x32. Texels the mask paints go on MAIN's ramp
   (entries 1-31) or ACCENT's (33-63) by brightness, and the rest go to the nearest fixed entry, so Rush 2's own paint
   (func_8008582C) colors them. Texels 0 and 1 are always entries 1 and 33, so the drawn paint can be read back from
-  them. A scuffed copy (the ramp shifted in blotches) is what a damaged panel draws. Flat single-color images have no
-  separate scuffed key.
+  them. A scuffed copy (the ramp shifted in blotches) is what a damaged panel draws. An image with no paint mask
+  (drawn as authored, like the arcade cars' schemes) has no ramp, so its colors are scaled lighter and darker in the
+  same blotches and each texel takes the nearest fixed entry; before this, such cars dented but never scuffed. Flat
+  single-color images have no separate scuffed key.
 - **Texture names:** `<PREFIX>Mnn`. They must differ per car: every mod container has the same layout, and
   `bank_instance` tells the bodies apart by the first texture record's name. With shared names, a car is matched to
   another car's body, and the dent hook writes that car's vertices into it (the mesh comes out scrambled).
@@ -210,6 +212,7 @@ Put these files per car in the mod under `rush2/new_cars/` (the car's ID is any 
 | `no_skid_marks` | `true`: the car's wheels lay no tire marks. Default `false`. |
 | `no_wheel_dust` | `true`: the car's wheels throw no dust, smoke or spray (its own effects, such as sparks, stay). Default `false`. |
 | `round_shadow` | A radius in feet: the car's shadow is a soft disc that wide around its middle (a hovering saucer's), on the ground under its wheels, in place of the box between them. Default: the game's shadow. |
+| `lights` | The car's lamps for [Car Lights](#car-lights): a list of `{"kind": "head" or "tail", "at": [x, y, z], "size": radius}` in the glb's space (1/16 ft units, as `wheels`), one entry per lamp (list both sides). The brightest texels within the radius glow as the lens, or with `"color": [r, g, b]` (the lens's color, 0-255) the texels near that color; `"lens": false` for a hidden lamp (no glow on the body). The headlamps or tail lamps listed replace the ones found on the body, kind by kind. Default: found on the body (tail lamps from the brake lights, headlamps from bright texels at the front, or else placed from the body's shape). |
 | `logo` | A 128 x 32 PNG in `rush2/new_cars/` drawn as the car's car select name logo instead of `name` in Rush 2049's lettering (the SF Rush PlayStation cars use it for SF Rush's lettering). Default: none. |
 | `box` | The box the car hits other cars with: front, rear, half width, height in feet. Default: from the mesh, about a quarter foot inside each end, at least 3 ft to a side, 3 ft high. Stock cars run 5.25 to 8 ft front and rear, half width 3 (the Caddy 3.25). |
 | `main_color`, `accent_color` | The colors a new player starts the car in, 0-31 (Rush 2's color list). Default: the base car's. Unused with `schemes`. |
@@ -285,9 +288,11 @@ rebuilt (a new Rush 2049 source).
 
 ### In the game
 
-- **Slots:** there are 16 new-car slots (car types 57-72). The enabled mods' cars fill them in mod order, then by
-  ID, and the car select lists them after California Speed's cars. A car past the 16th is left out, and the log
-  says so. Reordering or turning off mods can move a car to another slot: a player's saved choice on that slot then
+- **Slots:** there are 64 new-car slots (car types 57-120). The enabled mods' cars fill them in mod order, then by
+  ID, and the car select lists them after California Speed's cars. A car past the 64th is left out, and the log
+  says so (`[newcar] ... every mod car slot is taken`). Types stay below 128 because the game reads a car type as a
+  byte, often signed; the per-type RDRAM each extra type costs (about 2 KB) is laid out in `include/car_types.h`
+  (docs/rush2049_research/cars.md#8-implementation-v). Reordering or turning off mods can move a car to another slot: a player's saved choice on that slot then
   becomes the car now in it.
 - **Game Filter:** new cars count as CUSTOM.
 - **Car select rows:** a new car has no STRIPE or STRIPE COLOR row (no stripes are stamped on it). It shows MAIN
@@ -402,6 +407,55 @@ Test aid: `RUSH2_TEST_LIVERY=<style>` shows that STYLE on every car with liverie
 in): `tools/test_race.py 0 --cars 28 --env RUSH2_TEST_LIVERY=1 --script "14:A:5,19.2:B:3" --shots 18.8,19.6` brakes
 the Bruiser in the arcade's first Cuda livery.
 
+## Track map dots
+
+The race HUD's track map colors each car's dot by its MAIN COLOR: hud_race_setup_widgets (0x800A06F8) fills each dot
+model's palette (model +0x14, RGBA5551 halfwords, car i at +2 + i x 2) from the paint table by physics car +0x7EB, in
+two loops (ending at 0x800A0848 and 0x800A090C, `$v0` the model). A car drawn in its own textures isn't in its MAIN
+COLOR (a new car's color scheme, a livery, a Dreamcast disc's 2049 paint job), so a hook after each loop
+(`rush2_map_dot_colors`, src/paint_colors.cpp) gives its dot the color its look reads as
+(`rush2::car_mods::look_color`): the color covering most of the body (`scheme_color` in src/car_mods.cpp: the textures
+sampled over the triangles by area, binned at 3 bits a channel as the disc's paint job colors are, dark texels left
+out), cached on disk per glb (`lookcolor_<hash>`); a Dreamcast paint job's own color (`car2049::paint_job_color`). A
+new car with one look and a paint mask keeps the MAIN COLOR dot. Checked: the Deuce at MAIN COLOR 1 (its purple
+scheme) shows a purple dot (`test_race.py 1 --env RUSH2_TEST_RACE_CARS=58 --env RUSH2_TEST_RACE_COLOR=1`).
+
+## Car lights
+
+On night tracks, with Graphics > Car Lights on (the Enhanced preset's default), every car's headlamps light the road
+ahead and its tail lamps glow red behind it, brighter while it brakes (docs/graphics_effects.md#car-lights). A lamp
+goes out once its corner of the car is damaged. A [new car](#new-cars) gets its lamps one of two ways:
+
+- **Found on the body** (no `lights` in its `.json`): tail lamps from its [brake lights](#brake-lights) glb, headlamps
+  from bright texels at the front of the body, or else placed from the body's shape. This works for a car with bright,
+  clearly textured lamps; dark or gray headlamps, or lamps only painted into one big texture, are often missed.
+- **Listed** in the `.json`'s `lights`, one entry per lamp (both sides):
+
+```json
+"lights": [
+    { "kind": "head", "at": [ 30, 18, 70], "size": 4 },
+    { "kind": "head", "at": [-30, 18, 70], "size": 4 },
+    { "kind": "tail", "at": [ 28, 22, -68], "size": 3, "color": [220, 40, 30] },
+    { "kind": "tail", "at": [-28, 22, -68], "size": 3, "color": [220, 40, 30] }
+]
+```
+
+| Field | Meaning |
+| --- | --- |
+| `kind` | `"head"` or `"tail"`. |
+| `at` | The lamp's center on the body's surface, in the glb's space (1/16 ft, as `wheels`). |
+| `size` | The lens's radius, same units (default 4, a quarter of a foot). |
+| `color` | Optional. The lens's color, 0-255: only the texels near it glow (so paint of the same brightness round the lamp doesn't). Without it the brightest texels within `size` glow. |
+| `lens` | Optional, default true. `false` for a lamp the model doesn't show: it lights the road but nothing glows on the body. |
+
+Listed headlamps replace the ones found on the body, and listed tail lamps the found tail lamps, kind by kind, so a
+car can list just its headlamps and keep its tail lamps from the brake lights.
+
+Finding the numbers: `python tools/car_lamps.py glb <body>.glb tmp/x.json --key mod:<NAME>` turns the body into a
+dump, `sheet` draws it from the front and back with the lamps found, and `pick` measures a lamp from the texels in a
+box you give (docs/graphics_effects.md#reviewing-the-lamps). [Liveries](#liveries) have no `lights`: theirs are found
+on the livery's body and brake lights.
+
 ## Liveries
 
 A mod's `rush2/liveries/<ID>.json` gives an existing car more looks, each a whole mesh:
@@ -454,7 +508,11 @@ changes: for a livery, every body part the livery has its own of (FRAME1 by LOD,
 hood `H0_L`, `H2_L`, `H0D_L`, `H2D_L`) gets a `G_DL` branch to the livery's same-named list over its first command,
 and the car's other body parts (panels, damage parts, a hood the livery lacks) a `G_ENDDL`; for STYLE 1 it puts back the words it saved. The mirror walk (func_800776DC, which turns an asset's triangles
 over and follows branches) would turn a livery over twice and the car's own parts not at all, so
-`rush2_livery_mirror_begin` / `_end` put the loaded words back around it. The copy is found as `rush2_car49_paint` finds it: the id's texture bank (s16 at `car_banks` + id x 2)
+`rush2_livery_mirror_begin` / `_end` put the loaded words back around it. `_end` restores only the lists `_begin`
+found still holding the livery's words and drops the rest: a list whose words are gone was loaded over (the copy freed,
+another model there), and its first command can match the saved original by chance (a pipe sync), so writing the
+branch back put a jump into the new model aimed at the old livery list, now other data; RT64 then never reached the
+list's end and the game froze on a black loading screen. The copy is found as `rush2_car49_paint` finds it: the id's texture bank (s16 at `car_banks` + id x 2)
 gives the copy's texture records (0x80119220 + bank x 8), and the copy starts that far before them that its header
 word +8 (the texture table offset) says. (The car slot word 0x800D97E8 + id x 0x18 +0x14 is the car's palette, not
 its copy.) In the car select (game state 2) the id is the preview id, panel x 73 +

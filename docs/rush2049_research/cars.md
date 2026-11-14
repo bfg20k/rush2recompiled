@@ -151,13 +151,28 @@ Rims + 2049's rims (file 81). Rush 2 cars keep their stock rows and values. Choi
 ## 8. Implementation [V]
 
 - **Types.** The 2049 cars are Rush 2 types 23-35 (type 22 stays Rush 2's "no car" marker). The 22-entry per-type
-  tables (§2) and the per-type box tables move to copies for every type at 0x80200000.. (73 types with California
-  Speed's 36-56, docs/calspeed_research.md#7-cars, and the mod cars' 57-72, docs/car_mods.md#new-cars; the layout is
+  tables (§2) and the per-type box tables move to copies for every type at 0x80200000.. (121 types with California
+  Speed's 36-56, docs/calspeed_research.md#7-cars, and the mod cars' 57-120, docs/car_mods.md#new-cars; the layout is
   `include/car_types.h`, and `tools/rush2049/cartypes.py` generates the matching us.toml patches); preview ids become
-  player * 73 + type, so the race/preview per-car arrays move to 146-entry copies in two windows (from 0x80208000,
-  and the ones that don't fit from 0x8022A000). A fill loop that steps a pointer to an
+  player * 121 + type, so the race/preview per-car arrays move to 242-entry copies (about 134 KB) from 0x80178000, in
+  the RDRAM the game heap left when it moved (0x80170CC0-0x80200000, src/assets.cpp; a RAM dump of a 4-player race
+  showed nothing else there). Code addresses only each array's first 8 entries (the race cars), so an array starts
+  where those share one lui value. The car select's carousel is 0x1010 bytes a player (0x18 a car), the physics
+  descriptor pointers (0x80219200) have room for 112, and each player record's side slot holds 99 types' 13-byte
+  option blocks (0x510 bytes). Types stay below 128 (the game reads a type as a byte, often `lb`), and preview ids
+  (up to 241) are read unsigned. A fill loop that steps a pointer to an
   end (bne) needs that end a whole step from its start: cartypes.py rounds it up (func_8008A1FC's part-handle clear
   steps 8 bytes).
+- **The car select's part matrices are per preview id too.** On the car select (game state 2),
+  `race_scene_load_assets_8008A1FC` takes one matrix from the scene matrix pool (0x800EBE40, 0x30 each, count
+  0x80111878) and stores it at 0x8011921C; `scene_node_new_with_matrix_ex_80085ED8` then gives a preview car's part
+  matrix k at *0x8011921C + (id x 8 + k) x 0x30 (0x180 bytes an id; `car_build_scene_nodes_80085FD0` uses it for the
+  wheels, the car select's wheel placer `car_preview_copy_matrices_800878C8` scales them). Rush 2's 44 ids fit;
+  242 put ids 160 and up past 0x800FAE58, so building one (player panel 1, type 39 or later: the 486SE's neighbor)
+  wrote its wheel scale over the scene node count 0x800FAE58 and the world polygon count 0x800FAEF0, and
+  `view_fog_setup_8007C624` then drew thousands of garbage polygons and crashed (issue 67, from 1.0.53's 16 -> 64 mod
+  cars). The hook at 0x8008A2D4 (`rush2_preview_matrix_base`) points 0x8011921C at their own 242 x 0x180 bytes after
+  the preview id arrays (`car_types::preview_matrices`, 0x80199650).
 - **The part-handle table 0x8010C480 is not just 44 cars x 39 parts.** Indices 1716 and up hold track-object,
   debris and smoke model handles (the 0x800C5400 table: CONE1 = 1814, ...; func_80059450 uses 0x6C5), indexed from
   the same base by the object and particle code (func_80059450, func_8005AEA4, func_8005E918/F718/F900/FC08,

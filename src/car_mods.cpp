@@ -17,7 +17,7 @@
 // decodes the mod's images.
 //
 // A mod's rush2/new_cars/<ID>.glb and <ID>.json add a car instead: the same container, as one of the mod car types
-// 57-72 (rush2::car2049::set_mod_car), with the physics, sounds and options of the Rush 2 car the .json names as its
+// 57-120 (rush2::car2049::set_mod_car), with the physics, sounds and options of the Rush 2 car the .json names as its
 // base and the wheels where it puts them.
 
 #include <algorithm>
@@ -79,7 +79,7 @@ namespace {
         "D0_D2FR2", "D2_D2FR2", "D0_D2FL2", "D2_D2FL2", "D0_D2RR2", "D2_D2RR2", "D0_D2RL2", "D2_D2RL2", "D0_D2TOP2",
         "H0_L", "H2_L", "H0_R", "H2_R", "H0D_L", "H2D_L", "H0D_R", "H2D_R",
     };
-    constexpr uint32_t cache_version = 5;
+    constexpr uint32_t cache_version = 6;
 
     // Rush 2's car palette classes (0x800C5670, docs/game_fixes.md Rocket windshield): 1-31 MAIN, 33-63 ACCENT,
     // 64-95 / 112-143 / 208-255 stripe stamped, the rest fixed.
@@ -422,9 +422,27 @@ namespace {
             h ^= h >> 15;
             return float(h & 0xFFFF) / 65535.0f;
         };
+        // An image without a paint mask (drawn as authored, like the arcade cars' schemes) has no ramp to shift: its
+        // colors go lighter and darker in the same blotches, each the nearest fixed entry, as rush2::derive scuffs the
+        // full-size image (paint_mod) and scuff_true_color a livery's.
+        const bool unmasked = small_mask.empty();
         for (size_t i = 2; i < n; i++) {
             int v = s.texels[i];
             int first = v >= main_first && v <= main_last ? main_first : v >= accent_first && v <= accent_last ? accent_first : -1;
+            if (first < 0 && unmasked && !fixed.empty()) {
+                const uint8_t* p = &small.rgba[i * 4];
+                float k = 1.0f + (hash(int(i % s.width) / 3, int(i / s.width) / 3) - 0.5f) * 0.45f;
+                float r = std::min(255.0f, p[0] * k), g = std::min(255.0f, p[1] * k), b = std::min(255.0f, p[2] * k);
+                int best = fixed[0];
+                float bd = 1e9f;
+                for (int f : fixed) {
+                    const Rgba& c = car_palette[f];
+                    float d = 0.3f * (c.r - r) * (c.r - r) + 0.59f * (c.g - g) * (c.g - g) + 0.11f * (c.b - b) * (c.b - b);
+                    if (d < bd) { bd = d; best = f; }
+                }
+                s.scuffed[i] = uint8_t(best);
+                continue;
+            }
             if (first < 0) continue;
             int x = int(i % s.width) / 3, y = int(i / s.width) / 3;
             int shift = int(std::lround((hash(x, y) - 0.5f) * 8.0f));
@@ -761,6 +779,7 @@ namespace {
         size_t triangles = 0;
         std::shared_ptr<ModelMod> hood; // a livery's hood camera hood (its .json's "hoods")
         std::shared_ptr<ModelMod> brake; // a livery's brake lights, drawn only while braking (its .json's "brakes")
+        uint32_t color = 0x808080;       // a livery's look from afar, 0xRRGGBB (scheme_color): its track map dot
     };
     std::map<std::string, ModelMod> model_mods; // by model name (file name, upper case)
     std::string model_signature;
@@ -768,6 +787,79 @@ namespace {
     std::string upper(std::string s) {
         for (char& c : s) c = char(std::toupper((unsigned char)c));
         return s;
+    }
+
+    // The color a look reads as from afar, 0xRRGGBB, for the track map's dot of a car showing it
+    // (rush2::car_mods::look_color): the color covering most of its body, picked as Dreamcast paint jobs' colors are
+    // (rush2049_dc_model.cpp job_color: texels binned at 3 bits a channel, the fullest bin's average), sampled over the
+    // triangles by area (5 points each) so a texture's unused corners don't count. Dark texels (tires, glass, shadow)
+    // are left out unless nothing else is there. scheme: a new car's color scheme, -1 every part. The hood camera's
+    // hood and the brake lights don't count. Cached by `key` (the look's files), as the stand-ins are.
+    uint32_t scheme_color(const Model& model, int scheme, uint64_t key) {
+        char name[40];
+        snprintf(name, sizeof(name), "lookcolor_%016llx", (unsigned long long)key);
+        std::vector<uint8_t> blob;
+        if (rush2::track_cache::load_blob(name, key, blob) && blob.size() == 4) return be32(blob, 0);
+        std::map<int, Image> images;
+        std::map<uint32_t, std::array<double, 4>> bins, dark; // bin -> r, g, b sums (area weighted), area
+        for (const Part& part : model.parts) {
+            if ((scheme >= 0 && part.scheme != scheme) || part.hood || part.brake || part.image < 0 ||
+                part.uv.size() != part.pos.size()) {
+                continue;
+            }
+            auto at = images.find(part.image);
+            if (at == images.end()) {
+                Image image;
+                if (!rush2::upscale::decode_image(model.images[part.image], image)) image = Image{};
+                at = images.emplace(part.image, std::move(image)).first;
+            }
+            const Image& image = at->second;
+            if (image.empty()) continue;
+            for (size_t t = 0; t + 2 < part.tris.size(); t += 3) {
+                const uint32_t i[3] = { part.tris[t], part.tris[t + 1], part.tris[t + 2] };
+                if (i[0] >= part.pos.size() || i[1] >= part.pos.size() || i[2] >= part.pos.size()) continue;
+                const auto &a = part.pos[i[0]], &b = part.pos[i[1]], &c = part.pos[i[2]];
+                double e1[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] }, e2[3] = { c[0] - a[0], c[1] - a[1], c[2] - a[2] };
+                double cx = e1[1] * e2[2] - e1[2] * e2[1], cy = e1[2] * e2[0] - e1[0] * e2[2], cz = e1[0] * e2[1] - e1[1] * e2[0];
+                double area = 0.5 * std::sqrt(cx * cx + cy * cy + cz * cz);
+                if (!(area > 0.0)) continue;
+                // The centroid, and halfway from it to each corner and to the middle of the first edge.
+                static constexpr float weights[5][3] = { { 1 / 3.f, 1 / 3.f, 1 / 3.f }, { 2 / 3.f, 1 / 6.f, 1 / 6.f },
+                                                         { 1 / 6.f, 2 / 3.f, 1 / 6.f }, { 1 / 6.f, 1 / 6.f, 2 / 3.f },
+                                                         { 5 / 12.f, 5 / 12.f, 1 / 6.f } };
+                for (const auto& w : weights) {
+                    float u = w[0] * part.uv[i[0]][0] + w[1] * part.uv[i[1]][0] + w[2] * part.uv[i[2]][0];
+                    float v = w[0] * part.uv[i[0]][1] + w[1] * part.uv[i[1]][1] + w[2] * part.uv[i[2]][1];
+                    u -= std::floor(u);
+                    v -= std::floor(v);
+                    uint32_t x = std::min(image.width - 1, uint32_t(u * float(image.width)));
+                    uint32_t y = std::min(image.height - 1, uint32_t(v * float(image.height)));
+                    const uint8_t* p = &image.rgba[(size_t(y) * image.width + x) * 4];
+                    if (p[3] < 128) continue;
+                    auto& bin = (std::max({ p[0], p[1], p[2] }) < 48 ? dark : bins)[(p[0] >> 5) << 6 | (p[1] >> 5) << 3 | (p[2] >> 5)];
+                    bin[0] += p[0] * area;
+                    bin[1] += p[1] * area;
+                    bin[2] += p[2] * area;
+                    bin[3] += area;
+                }
+            }
+        }
+        const std::array<double, 4>* best = nullptr;
+        for (const auto* set : { &bins, &dark }) {
+            for (const auto& [k, b] : *set) {
+                if (best == nullptr || b[3] > (*best)[3]) best = &b;
+            }
+            if (best != nullptr) break;
+        }
+        uint32_t rgb = 0x808080;
+        if (best != nullptr) {
+            const auto& b = *best;
+            rgb = uint32_t(b[0] / b[3]) << 16 | uint32_t(b[1] / b[3]) << 8 | uint32_t(b[2] / b[3]);
+        }
+        blob.clear();
+        add32(blob, rgb);
+        rush2::track_cache::save_blob(name, key, blob);
+        return rgb;
     }
 
     // livery: a livery's (16 x 16, 512 bytes: a car carries every livery in each of its copies).
@@ -1098,6 +1190,13 @@ namespace {
     // first commands back (paint_livery).
     constexpr int types_all = rush2::car_types::types;       // every car type (Rush 2's, 2049's, ...)
     std::map<int, std::vector<ModelMod>> liveries;           // by car asset index
+    // A new car's looks from afar (scheme_color), by mod car slot: one per color scheme; painted, its one look takes
+    // MAIN COLOR (a paint mask), so the game's own paint color is its dot's. Game thread.
+    struct NewCarLook {
+        std::vector<uint32_t> colors;
+        bool painted = false;
+    };
+    NewCarLook new_car_looks[rush2::car_types::count_mod];
     std::atomic<int> livery_counts[types_all] = {};          // by car type, for the car select's rows
     std::string livery_signature;
     // Texture table offsets (header word 2) of the containers given liveries: paint_livery finds a loaded copy's
@@ -1109,6 +1208,7 @@ namespace {
         int id = -1;
     };
     std::map<std::pair<int, int>, LiveryBody> livery_bodies;
+    std::map<int, std::string> livery_body_files;   // livery body id -> its livery's file (Car Lights' key)
 
     std::string livery_prefix(int v) {
         char p[8];
@@ -1282,6 +1382,7 @@ namespace {
         for (size_t v = 0; v < it->second.size(); v++) {
             LiveryBody& b = livery_bodies[{ index, int(v) + 1 }];
             b.id = rush2::car2049::add_livery_body(b.id, out, livery_prefix(int(v) + 1), scuffs, loads_start, loads_end);
+            if (b.id >= 0) livery_body_files[b.id] = std::filesystem::path(it->second[v].file).stem().string();
         }
         return true;
     }
@@ -1315,7 +1416,10 @@ namespace {
     };
     std::map<uint32_t, Original> originals;
     std::map<uint32_t, std::pair<uint32_t, uint32_t>> livery_words;
-    bool lifted = false;  // livery_words words taken off for the mirror walk (rush2_livery_mirror_begin)
+    // The livery_words lists whose words rush2_livery_mirror_begin took off for the mirror walk: only these get them
+    // back. A list whose words were gone by then was loaded over (the copy freed, another model in its place), and
+    // writing them back would branch that model into whatever now holds the old livery list (a freeze in RT64).
+    std::vector<uint32_t> lifted;
     // The livery body each copy shows (copy base -> car2049::add_livery_body id, and the first FRAME1 list with the
     // branch to it there, which tells a copy still showing it from one loaded over).
     struct Shown {
@@ -1351,34 +1455,38 @@ namespace {
 extern "C" void rush2_livery_mirror_begin(uint8_t* rdram, recomp_context* ctx) {
     rush2::car2049::brake_mirror(rdram, true);
     std::lock_guard lock{ style_mutex };
-    if (livery_words.empty()) return;
-    for (const auto& [list, words] : livery_words) {
+    lifted.clear();
+    for (auto it = livery_words.begin(); it != livery_words.end();) {
+        const uint32_t list = it->first;
         auto o = originals.find(list);
-        if (o == originals.end()) continue;
-        if ((uint32_t)MEM_W(0, (int32_t)list) == words.first && (uint32_t)MEM_W(4, (int32_t)list) == words.second) {
+        if (o != originals.end() && (uint32_t)MEM_W(0, (int32_t)list) == it->second.first &&
+            (uint32_t)MEM_W(4, (int32_t)list) == it->second.second) {
             write_words(rdram, list, o->second.w0, o->second.w1);
+            lifted.push_back(list);
+            ++it;
+        }
+        else {
+            it = livery_words.erase(it); // loaded over since the livery was put on
         }
     }
-    lifted = true;
 }
 
 // Its exit (0x800777E8): the liveries' words back.
 extern "C" void rush2_livery_mirror_end(uint8_t* rdram, recomp_context* ctx) {
     rush2::car2049::brake_mirror(rdram, false);
     std::lock_guard lock{ style_mutex };
-    if (!lifted) return;
-    lifted = false;
-    for (auto it = livery_words.begin(); it != livery_words.end();) {
-        auto o = originals.find(it->first);
-        if (o != originals.end() && (uint32_t)MEM_W(0, (int32_t)it->first) == o->second.w0 &&
-            (uint32_t)MEM_W(4, (int32_t)it->first) == o->second.w1) {
-            write_words(rdram, it->first, it->second.first, it->second.second);
-            ++it;
+    for (uint32_t list : lifted) {
+        auto w = livery_words.find(list);
+        auto o = originals.find(list);
+        if (w == livery_words.end() || o == originals.end()) continue;
+        if ((uint32_t)MEM_W(0, (int32_t)list) == o->second.w0 && (uint32_t)MEM_W(4, (int32_t)list) == o->second.w1) {
+            write_words(rdram, list, w->second.first, w->second.second);
         }
         else {
-            it = livery_words.erase(it); // loaded over meanwhile
+            livery_words.erase(w); // loaded over meanwhile
         }
     }
+    lifted.clear();
 }
 
 int rush2::car_mods::livery_count(int type) {
@@ -1430,8 +1538,63 @@ int rush2::car_mods::livery_body(uint8_t* rdram, int id, uint32_t& base) {
     return s->second.body;
 }
 
+std::string rush2::car_mods::livery_name(uint8_t* rdram, int id) {
+    uint32_t base = 0;
+    const int body = livery_body(rdram, id, base);
+    if (body < 0) return std::string();
+    std::lock_guard lock{ livery_tables_mutex };
+    auto it = livery_body_files.find(body);
+    return it != livery_body_files.end() ? it->second : std::string();
+}
+
+namespace {
+    // Race car `id`'s (0-7) type and, for a human's, its player's profile (record address in the save area; 0 for a
+    // computer car, which always shows STYLE 1).
+    void race_car_identity(uint8_t* rdram, int id, int& type, uint32_t& profile) {
+        constexpr uint32_t car_table = 0x800D9C10;    // race cars: 9 bytes each, +1 type, +7 0xB0 a human's
+        constexpr uint32_t physics_cars = 0x800F5470; // 0x81C each: +0x7E8 2 a human's, +0x7EA its type
+        uint32_t car = physics_cars + id * 0x81C;
+        bool human = MEM_BU(0, (int32_t)(car + 0x7E8)) == 2;
+        type = human ? MEM_BU(0, (int32_t)(car + 0x7EA)) : MEM_BU(0, (int32_t)(car_table + id * 9 + 1));
+        profile = 0;
+        if (human) {
+            for (int p = 0; p < 4; p++) {
+                if (MEM_BU(0, rush2::players4::record(p)) == id) profile = (uint32_t)MEM_W(0x24, rush2::players4::record(p));
+            }
+        }
+    }
+}
+
+bool rush2::car_mods::look_color(uint8_t* rdram, int id, uint32_t& rgb) {
+    constexpr uint32_t physics_cars = 0x800F5470;     // 0x81C each: +0x7EB its MAIN COLOR (what picks a scheme)
+    if (id < 0 || id >= 8) return false;
+    int type = -1;
+    uint32_t profile = 0;
+    race_car_identity(rdram, id, type, profile);
+    if (type < 0 || type >= types_all) return false;
+    // A livery (STYLE 2 and up): its own textures, whatever the paint bytes say.
+    if (int style = livery_style(rdram, profile, type); style > 0) {
+        int index = type < types ? first_car_asset + type : rush2::car2049::car_asset(type);
+        auto it = liveries.find(index);
+        if (it != liveries.end() && style <= int(it->second.size())) {
+            rgb = it->second[style - 1].color;
+            return true;
+        }
+    }
+    int main = MEM_BU(0, (int32_t)(physics_cars + id * 0x81C + 0x7EB));
+    if (main >= rush2::paint_colors::max_colors) main = 0; // as rush2_car49_paint reads it
+    // A new car: its scheme (MAIN COLOR % schemes) as authored, or its one look when no paint mask takes MAIN COLOR.
+    if (rush2::car_types::is_mod(type)) {
+        const NewCarLook& look = new_car_looks[type - rush2::car_types::first_mod];
+        if (look.colors.empty() || (look.colors.size() == 1 && look.painted)) return false;
+        rgb = look.colors[size_t(main) % look.colors.size()];
+        return true;
+    }
+    // A Dreamcast disc's Rush 2049 car: its paint job (MAIN COLOR % jobs, rush2_car49_paint).
+    return rush2::car2049::paint_job_color(type, main, rgb);
+}
+
 void rush2::car_mods::paint_livery(uint8_t* rdram, int id) {
-    constexpr uint32_t car_table = 0x800D9C10;   // race cars: 9 bytes each, +1 type, +7 0xB0 a human's
     int type = -1;
     uint32_t profile = 0;
     if (MEM_W(0, (int32_t)game_state) == 2) {     // the car select: id = panel x types + type
@@ -1443,16 +1606,8 @@ void rush2::car_mods::paint_livery(uint8_t* rdram, int id) {
         profile = (uint32_t)MEM_W(0x24, rush2::players4::record(player));
     }
     else {                                        // a race car: a human's is its player's ("car = player", +0)
-        constexpr uint32_t physics_cars = 0x800F5470; // 0x81C each: +0x7E8 2 a human's, +0x7EA its type
         if (id < 0 || id >= 8) return;
-        uint32_t car = physics_cars + id * 0x81C;
-        bool human = MEM_BU(0, (int32_t)(car + 0x7E8)) == 2;
-        type = human ? MEM_BU(0, (int32_t)(car + 0x7EA)) : MEM_BU(0, (int32_t)(car_table + id * 9 + 1));
-        if (human) {
-            for (int p = 0; p < 4; p++) {
-                if (MEM_BU(0, rush2::players4::record(p)) == id) profile = (uint32_t)MEM_W(0x24, rush2::players4::record(p));
-            }
-        }
+        race_car_identity(rdram, id, type, profile);
     }
     if (livery_count(type) == 0) return;
     int style = livery_style(rdram, profile, type);
@@ -1613,6 +1768,7 @@ namespace {
         std::shared_ptr<Model> model;
         std::vector<uint8_t> car;
         std::vector<StandIn> stand_ins;
+        NewCarLook look;
     };
     struct ReplacementPlan {
         enum State { none, failed, ok } state = none;  // no mod has the car, one has it but it can't be converted, converted
@@ -1939,6 +2095,7 @@ namespace {
                             error.empty() ? "unreadable" : error.c_str());
                     continue;
                 }
+                mm.color = scheme_color(*mm.model, -1, mm.glb_hash);
                 std::string hood_file = si < hoods.size() && hoods[si].is_string() ? hoods[si].get<std::string>() : "";
                 if (!hood_file.empty()) {
                     auto hood = std::make_shared<ModelMod>();
@@ -1979,7 +2136,7 @@ namespace {
 
     // ---- new cars -------------------------------------------------------------------------------------------------
     // A mod's rush2/new_cars/<ID>.json and <ID>.glb add a car (docs/car_mods.md#new-cars): the enabled mods' cars, in
-    // mod order and then by ID, fill the 16 mod car types (include/car_types.h) in turn.
+    // mod order and then by ID, fill the 64 mod car types (include/car_types.h) in turn.
     struct NewCarFile {
         std::string id;  // <ID>, as the mod spells it
         size_t mod;
@@ -2110,6 +2267,36 @@ namespace {
                 return false;
             }
             spec.shadow_radius = std::min(j["round_shadow"].get<float>(), 20.0f);
+        }
+        // Car Lights' lamps (src/car_lights.cpp): [{"kind": "head" | "tail", "at": [x, y, z], "size": r}], in the glb's
+        // space as "wheels" (1/16 ft, its x the game's turned over).
+        spec.lamps.clear();
+        if (j.contains("lights")) {
+            const char* lights_error = "\"lights\" is a list of {\"kind\": \"head\" or \"tail\", \"at\": [x, y, z], \"size\": radius} in the glb's space";
+            if (!j["lights"].is_array()) {
+                error = lights_error;
+                return false;
+            }
+            for (const auto& e : j["lights"]) {
+                float at[3];
+                if (!e.is_object() || !e.contains("at") || !vec(e["at"], at, 3) || !e.contains("kind") || !e["kind"].is_string() ||
+                    (e["kind"] != "head" && e["kind"] != "tail") || (e.contains("size") && !e["size"].is_number())) {
+                    error = lights_error;
+                    return false;
+                }
+                rush2::car_lights::LampSpec lamp;
+                lamp.head = e["kind"] == "head";
+                lamp.at[0] = -at[0] / 16.0f;
+                lamp.at[1] = at[1] / 16.0f;
+                lamp.at[2] = at[2] / 16.0f;
+                lamp.size = e.contains("size") ? std::clamp(e["size"].get<float>() / 16.0f, 0.05f, 2.0f) : 0.25f;
+                if (e.contains("lens") && e["lens"].is_boolean()) lamp.lens = e["lens"].get<bool>();
+                if (e.contains("color") && e["color"].is_array() && e["color"].size() == 3) {
+                    lamp.has_color = true;
+                    for (int k = 0; k < 3; k++) lamp.color[k] = e["color"][k].is_number() ? e["color"][k].get<float>() : 0.0f;
+                }
+                spec.lamps.push_back(lamp);
+            }
         }
         // The car select's name logo: a 128 x 32 image in rush2/new_cars/ (read by load_new_cars into spec.logo).
         logo_file.clear();
@@ -2379,6 +2566,11 @@ namespace {
                 }
             }
             c.spec = spec;
+            c.look.painted = spec.paint_main;
+            for (size_t k = 0; k < glbs.size(); k++) {
+                c.look.colors.push_back(
+                    scheme_color(*c.model, int(k), rush2::track_cache::hash(glbs[k].data(), glbs[k].size(), cache_version)));
+            }
             plan.new_cars.push_back(std::move(c));
         }
         plan.slots_used = slot;
@@ -2533,6 +2725,7 @@ namespace {
                    c.spec.name.c_str(), c.id.c_str(), c.mod_id.c_str(), rush2::car_types::first_mod + n,
                    triangles, c.stand_ins.size(), c.spec.schemes, car_bytes / 1024, prefixes[c.spec.base]);
             applied_new_key[n] = c.key;
+            new_car_looks[n] = std::move(c.look);
             online_checks[n] = online_check(c.key);
             {
                 std::lock_guard lock{ slot_ids_mutex };
@@ -2549,6 +2742,7 @@ namespace {
             rush2::car2049::clear_mod_car(rdram, n);
             printf("[newcar] mod car slot %d emptied\n", n + 1);
             applied_new_key[n].clear();
+            new_car_looks[n] = NewCarLook{};
             online_checks[n] = 0;
             {
                 std::lock_guard lock{ slot_ids_mutex };
