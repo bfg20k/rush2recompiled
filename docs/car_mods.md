@@ -583,9 +583,3 @@ Limits:
 - **Stand-in resolution:** without texture replacements, the stand-ins draw (64x32 at most).
 - **Texture swaps:** animated textures and texture swaps act on the original lists' texture loads, so they don't reach a
   replaced model. These are LOD flag 0x1 and the CHKPOINT -> FINISH banner.
-
-## Crash in car_init_setup during the launch build pass (prepare_bar_ranges)
-
-`RUSH2_BARS_TRACE=1` makes the bar-range test car print `[bars] test car type N: descriptor index I, pointer P` to stderr
-before each `car_init_setup_8008DBA0`; the last line before a segfault there names the type whose descriptor pointer
-(desc_ptrs + t_desc_index[type] * 4) is wrong. "Accurate Car Stats" off skips the pass.

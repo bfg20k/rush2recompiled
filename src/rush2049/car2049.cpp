@@ -8,7 +8,6 @@
 // src/calspeed/calspeed_cars.cpp and the mod cars' (57-120) by set_mod_car (src/car_mods.cpp).
 
 #include <cstdio>
-#include <cstdlib>
 #include <algorithm>
 #include <cctype>
 #include <array>
@@ -4953,14 +4952,6 @@ namespace {
             MEM_B(0, (int32_t)(car + 0x7E8)) = 2;       // driven by a player
             MEM_H(0, (int32_t)(car + 0x7E0)) = 0;       // player 1
             call.r4 = addr(car);
-            if (std::getenv("RUSH2_BARS_TRACE") != nullptr) {
-                // Diagnostic for a crash in car_init_setup_8008DBA0 during the launch's build pass: the last line
-                // printed before it names the type and the descriptor pointer the game was about to read.
-                uint32_t index = MEM_BU(0, (int32_t)(t_desc_index + s.type));
-                fprintf(stderr, "[bars] test car type %d: descriptor index %u, pointer %08X\n", s.type, index,
-                        (uint32_t)MEM_W(0, (int32_t)(desc_ptrs + index * 4)));
-                fflush(stderr);
-            }
             car_init_setup_8008DBA0(rdram, &call);
             MEM_H(0, (int32_t)(car + 0x3D8)) = 1;       // automatic
             MEM_H(0, (int32_t)(car + 0x3E0)) = 1;       // a forward gear asked for (0 = neutral, func_800711F4)
