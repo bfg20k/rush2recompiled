@@ -126,3 +126,7 @@ lists is the whole interpretation of the game's list on the render thread (draw 
 so the rest is the interpreter itself). A high import time with many misses means the 512-entry texture cache is
 thrashing (it empties itself when full), and each miss also pays the texture hook (`drawn`) under the replacement bridge.
 The hitch profiler (RUSH2_HITCH_LOG) is Windows only; on Linux this line and `perf record -g` are the tools.
+
+The timing line has a second line breaking the display list time down: vertex loads, triangles (draw submits and texture
+imports are inside it) and texture rects. Texture imports on a cache hit cost the hash of the texture's bytes
+(`gfx_texture_key`), now eight bytes a step. The texture cache holds 4096 textures; at 512 a 2049 track emptied it every frame.

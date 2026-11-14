@@ -195,7 +195,7 @@ static uint64_t dbg_now_ns(void) {
 }
 #endif
 static struct {
-    uint64_t run_ns, flush_ns, import_ns;
+    uint64_t run_ns, flush_ns, import_ns, vertex_ns, tri_ns, rect_ns;
     unsigned frames, imports, misses, uploads, flushes;
 } dbg_time;
 
@@ -366,10 +366,18 @@ static inline uint8_t rdram_byte(const uint8_t *p, uint32_t i) {
     return g_rdram[(uint32_t)((p - g_rdram) + i) ^ 3];
 }
 
+// Texture and palette hash (the cache keys only need to agree within a run). Eight bytes a step: a texture is hashed
+// on every import (about a thousand a frame on a 2049 track), and one byte a step cost 4 us for a 64x64 texture.
 static uint64_t gfx_fnv1a(uint64_t h, const uint8_t *data, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-        h ^= data[i];
-        h *= 0x100000001b3ULL;
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t w;
+        memcpy(&w, data + i, 8);
+        h = (h ^ w) * 0x9E3779B97F4A7C15ULL;
+        h ^= h >> 32;
+    }
+    for (; i < n; i++) {
+        h = (h ^ data[i]) * 0x100000001b3ULL;
     }
     return h;
 }
@@ -888,7 +896,14 @@ static float gfx_adjust_x_for_aspect_ratio(float x) {
     return x * (4.0f / 3.0f) / ((float)gfx_current_dimensions.width / (float)gfx_current_dimensions.height);
 }
 
+static void gfx_sp_vertex_impl(size_t n_vertices, size_t dest_index, const void *vertices);
 static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const void *vertices) {
+    const uint64_t start = dbg_now_ns();
+    gfx_sp_vertex_impl(n_vertices, dest_index, vertices);
+    dbg_time.vertex_ns += dbg_now_ns() - start;
+}
+
+static void gfx_sp_vertex_impl(size_t n_vertices, size_t dest_index, const void *vertices) {
     if (dest_index >= MAX_VERTICES) {
         return; // also catches the unsigned underflow of a corrupt v0 - n
     }
@@ -1004,7 +1019,14 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const void *vert
     }
 }
 
+static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx);
 static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
+    const uint64_t start = dbg_now_ns();
+    gfx_sp_tri1_impl(vtx1_idx, vtx2_idx, vtx3_idx);
+    dbg_time.tri_ns += dbg_now_ns() - start;
+}
+
+static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     if (vtx1_idx >= MAX_VERTICES + 4 || vtx2_idx >= MAX_VERTICES + 4 || vtx3_idx >= MAX_VERTICES + 4) { // the last 4 slots are the rect corners
         return;
     }
@@ -1609,7 +1631,14 @@ static void gfx_draw_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lr
     }
 }
 
+static void gfx_dp_texture_rectangle_impl(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint8_t tile, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip);
 static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint8_t tile, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip) {
+    const uint64_t start = dbg_now_ns();
+    gfx_dp_texture_rectangle_impl(ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, flip);
+    dbg_time.rect_ns += dbg_now_ns() - start;
+}
+
+static void gfx_dp_texture_rectangle_impl(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint8_t tile, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip) {
     uint64_t saved_combine_mode = rdp.combine_mode;
     if ((rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_COPY) {
         // Per RDP Command Summary Set Tile's shift s and this dsdx should be set to 4 texels
@@ -2152,9 +2181,11 @@ static void dbg_end_frame(void) {
     if (dbg.frame % 300 == 0 && dbg_time.frames > 0) {
         const double f = (double)dbg_time.frames;
         fprintf(stderr, "[fast3d] timing, last %u frames, per frame: display lists %.2f ms (draw submits %.2f ms for %.0f flushes, "
-                "texture imports %.2f ms for %.0f imports, %.1f misses, %.1f replacement uploads)\n",
+                "texture imports %.2f ms for %.0f imports, %.1f misses, %.1f replacement uploads)\n"
+                "[fast3d]   of that, vertex loads %.2f ms, triangles %.2f ms (draw submits and texture imports inside), texture rects %.2f ms\n",
                 dbg_time.frames, dbg_time.run_ns / f / 1e6, dbg_time.flush_ns / f / 1e6, dbg_time.flushes / f,
-                dbg_time.import_ns / f / 1e6, dbg_time.imports / f, dbg_time.misses / f, dbg_time.uploads / f);
+                dbg_time.import_ns / f / 1e6, dbg_time.imports / f, dbg_time.misses / f, dbg_time.uploads / f,
+                dbg_time.vertex_ns / f / 1e6, dbg_time.tri_ns / f / 1e6, dbg_time.rect_ns / f / 1e6);
         memset(&dbg_time, 0, sizeof(dbg_time));
     }
     if (dbg.bin != NULL) fclose(dbg.bin);
