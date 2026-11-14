@@ -200,8 +200,22 @@ static void gfx_apply_scissor(const struct XYWidthHeight *sc) {
 
 static int dbg_range_lo = -1, dbg_range_hi = -1, dbg_flush_no = 0;
 
+// Debug switches, read once: getenv walks the whole environment, far too slow to call per draw and per texture.
+static const char *dbg_env_flush_verts, *dbg_env_dump_tex, *dbg_env_dump_slot, *dbg_env_texa, *dbg_env_rectuv;
+static bool dbg_env_read;
+static void dbg_read_env(void) {
+    if (dbg_env_read) return;
+    dbg_env_flush_verts = getenv("RUSH2_F3D_FLUSH_VERTS");
+    dbg_env_dump_tex = getenv("RUSH2_F3D_DUMP_TEX");
+    dbg_env_dump_slot = getenv("RUSH2_F3D_DUMP_SLOT");
+    dbg_env_texa = getenv("TEXA");
+    dbg_env_rectuv = getenv("RUSH2_F3D_RECTUV");
+    dbg_env_read = true;
+}
+
 static void gfx_flush(void) {
     if (buf_vbo_len > 0) {
+        dbg_read_env();
         int num = buf_vbo_num_tris;
         dbg_note_draw(buf_vbo_num_tris);
         unsigned long t0 = get_time();
@@ -212,8 +226,8 @@ static void gfx_flush(void) {
             if (r != NULL) sscanf(r, "%d,%d", &dbg_range_lo, &dbg_range_hi);
         }
         const int no = dbg_flush_no++;
-        if (getenv("RUSH2_F3D_FLUSH_VERTS") != NULL && buf_vbo_len >= 8) {
-            if (getenv("RUSH2_F3D_FLUSH_VERTS")[0] == '2') {
+        if (dbg_env_flush_verts != NULL && buf_vbo_len >= 8) {
+            if (dbg_env_flush_verts[0] == '2') {
                 const size_t per = buf_vbo_len / (buf_vbo_num_tris * 3);
                 fprintf(stderr, "[fast3d] flush %d vertex floats (%zu each):", no, per);
                 for (size_t k = 0; k < per; k++) fprintf(stderr, " %.3f", buf_vbo[k]);
@@ -609,7 +623,8 @@ static void import_texture(int slot) {
         }
     }
 
-    if (getenv("RUSH2_F3D_FLUSH_VERTS") != NULL) {
+    dbg_read_env();
+    if (dbg_env_flush_verts != NULL) {
         fprintf(stderr, "[fast3d] import texture slot %d for flush %d: fmt=%u siz=%u line=%u tmem=%u size=%ux%u pal=%u tlut=%u\n", slot, dbg_flush_no, t->fmt, t->siz, t->line, t->tmem, w, h, t->palette, (rdp.other_mode_h >> 14) & 3);
         if (t->fmt == G_IM_FMT_CI) {
             fprintf(stderr, "[fast3d]   tlut[0..15]:");
@@ -675,10 +690,10 @@ static void import_texture(int slot) {
     if ((t->fmt == G_IM_FMT_RGBA && t->siz == G_IM_SIZ_16b) || (t->fmt == G_IM_FMT_CI && !tlut_is_ia16())) {
         bleed_transparent_texels(rgba, w, h);
     }
-    if (getenv("RUSH2_F3D_DUMP_TEX") && (int)atoi(getenv("RUSH2_F3D_DUMP_TEX")) == dbg_flush_no && (!getenv("RUSH2_F3D_DUMP_SLOT") || atoi(getenv("RUSH2_F3D_DUMP_SLOT")) == slot)) {
+    if (dbg_env_dump_tex && atoi(dbg_env_dump_tex) == dbg_flush_no && (!dbg_env_dump_slot || atoi(dbg_env_dump_slot) == slot)) {
         FILE *f = fopen("tmp/user1/tex.ppm", "wb");
         fprintf(f, "P6\n%u %u\n255\n", w, h);
-        for (uint32_t k = 0; k < w * h; k++) { if (getenv("TEXA")) { for (int q = 0; q < 3; q++) fputc(rgba[4 * k + 3], f); } else fwrite(rgba + 4 * k, 1, 3, f); }
+        for (uint32_t k = 0; k < w * h; k++) { if (dbg_env_texa) { for (int q = 0; q < 3; q++) fputc(rgba[4 * k + 3], f); } else fwrite(rgba + 4 * k, 1, 3, f); }
         fclose(f);
         fprintf(stderr, "dumped texture %ux%u\n", w, h);
     }
@@ -2292,7 +2307,7 @@ static void gfx_run_dl(Gfx* cmd) {
                 dsdx = C1(16, 16);
                 dtdy = C1(0, 16);
 #endif
-                if (getenv("RUSH2_F3D_RECTUV")) fprintf(stderr, "rect uv: uls=%d ult=%d dsdx=%d dtdy=%d tile=%d\n", (int16_t)uls, (int16_t)ult, (int16_t)dsdx, (int16_t)dtdy, tile);
+                if (dbg_read_env(), dbg_env_rectuv) fprintf(stderr, "rect uv: uls=%d ult=%d dsdx=%d dtdy=%d tile=%d\n", (int16_t)uls, (int16_t)ult, (int16_t)dsdx, (int16_t)dtdy, tile);
                 gfx_dp_texture_rectangle(ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, opcode == G_TEXRECTFLIP);
                 break;
             }
