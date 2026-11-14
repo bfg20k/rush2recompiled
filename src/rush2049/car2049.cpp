@@ -4509,9 +4509,10 @@ extern "C" void rush2_car49_setup_desc(uint8_t* rdram, recomp_context* ctx) {
         uint32_t index = MEM_BU(0, (int32_t)(t_desc_index + type));
         fprintf(stderr, "[bars] setup_desc: car %08X type %d slot %d, $fp %016llX, table[%u] = %08X\n", car, type, slot,
                 (unsigned long long)ctx->r30, index, (uint32_t)MEM_W(0, (int32_t)(desc_ptrs + index * 4)));
-        fprintf(stderr, "[bars]   t6 %016llX t7 %016llX t8 %016llX t9 %016llX at %016llX s1 %016llX\n",
+        fprintf(stderr, "[bars]   t6 %016llX t7 %016llX t8 %016llX t9 %016llX at %016llX s1 %016llX; table at t7: %08X\n",
                 (unsigned long long)ctx->r14, (unsigned long long)ctx->r15, (unsigned long long)ctx->r24,
-                (unsigned long long)ctx->r25, (unsigned long long)ctx->r1, (unsigned long long)ctx->r17);
+                (unsigned long long)ctx->r25, (unsigned long long)ctx->r1, (unsigned long long)ctx->r17,
+                (uint32_t)MEM_W(0, (int32_t)(desc_ptrs + (uint32_t)ctx->r15)));
         fflush(stderr);
     }
     if (slot < 0 || slot >= 8) {
