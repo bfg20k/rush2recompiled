@@ -80,6 +80,8 @@ struct TextureHashmapNode {
     uint32_t gen, rserial;
     bool has_hash, replaced, seen_world;
 };
+#define TEXTURE_CACHE_BUCKETS 8192
+#define TEXTURE_CACHE_NODES 4096
 static struct {
     // A 2049 track draws over 900 distinct textures a frame; at 512 the cache emptied itself every frame and every
     // texture was decoded and uploaded again (30-40 ms a frame). Sized for the biggest tracks (a node is ~64 bytes).
