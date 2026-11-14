@@ -199,6 +199,12 @@ static struct {
     unsigned frames, imports, misses, uploads, flushes;
 } dbg_time;
 
+// Per-opcode timing of one frame in 300 (see gfx_run_dl).
+static bool dbg_op_timing;
+static uint64_t dbg_op_ns[256], dbg_op_last_ns;
+static unsigned dbg_op_count[256];
+static int dbg_op_last = -1;
+
 static void dbg_note_draw(size_t tris);
 static void dbg_note_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry);
 
@@ -2218,10 +2224,6 @@ static void dbg_end_frame(void) {
 
 // One frame in 300 (the one before the timing line) is timed command by command: the time from one command's start to
 // the next's is charged to its opcode, and the frame's timing line lists the costliest opcodes.
-static bool dbg_op_timing;
-static uint64_t dbg_op_ns[256], dbg_op_last_ns;
-static unsigned dbg_op_count[256];
-static int dbg_op_last = -1;
 
 static void gfx_run_dl(Gfx* cmd) {
     int dummy = 0;
