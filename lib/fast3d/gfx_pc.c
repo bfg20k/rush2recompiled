@@ -194,13 +194,13 @@ static uint64_t dbg_now_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 #endif
+static bool dbg_op_timing; // the one frame in 300 that is timed in detail (the clock costs too much to read per triangle)
 static struct {
     uint64_t run_ns, flush_ns, import_ns, vertex_ns, tri_ns, rect_ns;
     unsigned frames, imports, misses, uploads, flushes;
 } dbg_time;
 
 // Per-opcode timing of one frame in 300 (see gfx_run_dl).
-static bool dbg_op_timing;
 static uint64_t dbg_op_ns[256], dbg_op_last_ns;
 static unsigned dbg_op_count[256];
 static int dbg_op_last = -1;
@@ -250,7 +250,7 @@ static void dbg_read_env(void) {
 
 static void gfx_flush(void) {
     if (buf_vbo_len > 0) {
-        const uint64_t flush_start = dbg_now_ns();
+        const uint64_t flush_start = dbg_op_timing ? dbg_now_ns() : 0;
         dbg_time.flushes++;
         dbg_read_env();
         int num = buf_vbo_num_tris;
@@ -285,7 +285,7 @@ static void gfx_flush(void) {
         /*if (t1 - t0 > 1000) {
             printf("f: %d %d\n", num, (int)(t1 - t0));
         }*/
-        dbg_time.flush_ns += dbg_now_ns() - flush_start;
+        if (dbg_op_timing) dbg_time.flush_ns += dbg_now_ns() - flush_start;
     }
 }
 
@@ -627,10 +627,10 @@ static void notify_drawn(const struct TileDesc *t, struct TextureHashmapNode *n)
 
 static void import_texture_impl(int slot);
 static void import_texture(int slot) {
-    const uint64_t start = dbg_now_ns();
+    const uint64_t start = dbg_op_timing ? dbg_now_ns() : 0;
     dbg_time.imports++;
     import_texture_impl(slot);
-    dbg_time.import_ns += dbg_now_ns() - start;
+    if (dbg_op_timing) dbg_time.import_ns += dbg_now_ns() - start;
 }
 
 static void import_texture_impl(int slot) {
@@ -904,9 +904,9 @@ static float gfx_adjust_x_for_aspect_ratio(float x) {
 
 static void gfx_sp_vertex_impl(size_t n_vertices, size_t dest_index, const void *vertices);
 static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const void *vertices) {
-    const uint64_t start = dbg_now_ns();
+    const uint64_t start = dbg_op_timing ? dbg_now_ns() : 0;
     gfx_sp_vertex_impl(n_vertices, dest_index, vertices);
-    dbg_time.vertex_ns += dbg_now_ns() - start;
+    if (dbg_op_timing) dbg_time.vertex_ns += dbg_now_ns() - start;
 }
 
 static void gfx_sp_vertex_impl(size_t n_vertices, size_t dest_index, const void *vertices) {
@@ -1027,9 +1027,9 @@ static void gfx_sp_vertex_impl(size_t n_vertices, size_t dest_index, const void 
 
 static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx);
 static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
-    const uint64_t start = dbg_now_ns();
+    const uint64_t start = dbg_op_timing ? dbg_now_ns() : 0;
     gfx_sp_tri1_impl(vtx1_idx, vtx2_idx, vtx3_idx);
-    dbg_time.tri_ns += dbg_now_ns() - start;
+    if (dbg_op_timing) dbg_time.tri_ns += dbg_now_ns() - start;
 }
 
 static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
@@ -1639,9 +1639,9 @@ static void gfx_draw_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lr
 
 static void gfx_dp_texture_rectangle_impl(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint8_t tile, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip);
 static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint8_t tile, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip) {
-    const uint64_t start = dbg_now_ns();
+    const uint64_t start = dbg_op_timing ? dbg_now_ns() : 0;
     gfx_dp_texture_rectangle_impl(ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, flip);
-    dbg_time.rect_ns += dbg_now_ns() - start;
+    if (dbg_op_timing) dbg_time.rect_ns += dbg_now_ns() - start;
 }
 
 static void gfx_dp_texture_rectangle_impl(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint8_t tile, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip) {
@@ -2203,12 +2203,16 @@ static void dbg_end_frame(void) {
     }
     if (dbg.frame % 300 == 0 && dbg_time.frames > 0) {
         const double f = (double)dbg_time.frames;
-        fprintf(stderr, "[fast3d] timing, last %u frames, per frame: display lists %.2f ms (draw submits %.2f ms for %.0f flushes, "
-                "texture imports %.2f ms for %.0f imports, %.1f misses, %.1f replacement uploads)\n"
-                "[fast3d]   of that, vertex loads %.2f ms, triangles %.2f ms (draw submits and texture imports inside), texture rects %.2f ms\n",
-                dbg_time.frames, dbg_time.run_ns / f / 1e6, dbg_time.flush_ns / f / 1e6, dbg_time.flushes / f,
-                dbg_time.import_ns / f / 1e6, dbg_time.imports / f, dbg_time.misses / f, dbg_time.uploads / f,
-                dbg_time.vertex_ns / f / 1e6, dbg_time.tri_ns / f / 1e6, dbg_time.rect_ns / f / 1e6);
+        // The display list time is the average over the frames; the breakdown is of the one timed frame (the clock is
+        // too slow to read per triangle on every frame).
+        fprintf(stderr, "[fast3d] timing, per frame over the last %u frames: display lists %.2f ms; %.0f draw submits, "
+                "%.0f texture imports, %.1f cache misses, %.1f replacement uploads\n",
+                dbg_time.frames, dbg_time.run_ns / f / 1e6, dbg_time.flushes / f, dbg_time.imports / f,
+                dbg_time.misses / f, dbg_time.uploads / f);
+        fprintf(stderr, "[fast3d]   timed frame: draw submits %.2f ms, texture imports %.2f ms, vertex loads %.2f ms, "
+                "triangles %.2f ms (submits and imports inside), texture rects %.2f ms\n",
+                dbg_time.flush_ns / 1e6, dbg_time.import_ns / 1e6, dbg_time.vertex_ns / 1e6,
+                dbg_time.tri_ns / 1e6, dbg_time.rect_ns / 1e6);
         memset(&dbg_time, 0, sizeof(dbg_time));
     }
     if (dbg.bin != NULL) fclose(dbg.bin);
