@@ -117,3 +117,12 @@ generated packs (`set_generated_texture_pack`: a folder with an `rt64.json` of R
 call sites use `rush2::live::set_pack(id, folder)` instead: it parses `rt64.json`, and the first time a texture with a pack
 hash is drawn a worker thread reads and decodes the image; the generation then changes and the texture swaps in (so a
 track's textures sharpen a moment after they first appear, never stalling the frame). Same hash caveat as above.
+
+## Frame timing log
+
+Every 300 frames the core logs `[fast3d] timing, last N frames, per frame: display lists X ms (draw submits Y ms for F
+flushes, texture imports Z ms for I imports, M misses, U replacement uploads)`: the averages over those frames. Display
+lists is the whole interpretation of the game's list on the render thread (draw submits and texture imports are inside it,
+so the rest is the interpreter itself). A high import time with many misses means the 512-entry texture cache is
+thrashing (it empties itself when full), and each miss also pays the texture hook (`drawn`) under the replacement bridge.
+The hitch profiler (RUSH2_HITCH_LOG) is Windows only; on Linux this line and `perf record -g` are the tools.

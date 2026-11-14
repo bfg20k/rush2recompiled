@@ -170,6 +170,31 @@ static unsigned long get_time(void) {
     return 0;
 }
 
+// Frame timing for the periodic "[fast3d] timing" log line: nanoseconds spent running display lists, submitting
+// draws (gfx_flush) and importing textures (cache misses, hooks and replacement uploads included), summed over the
+// frames since the last line.
+#ifdef _WIN32
+#include <windows.h>
+static uint64_t dbg_now_ns(void) {
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER t;
+    if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t);
+    return (uint64_t)((double)t.QuadPart * 1e9 / (double)freq.QuadPart);
+}
+#else
+#include <time.h>
+static uint64_t dbg_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+#endif
+static struct {
+    uint64_t run_ns, flush_ns, import_ns;
+    unsigned frames, imports, misses, uploads, flushes;
+} dbg_time;
+
 static void dbg_note_draw(size_t tris);
 static void dbg_note_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry);
 
@@ -215,6 +240,8 @@ static void dbg_read_env(void) {
 
 static void gfx_flush(void) {
     if (buf_vbo_len > 0) {
+        const uint64_t flush_start = dbg_now_ns();
+        dbg_time.flushes++;
         dbg_read_env();
         int num = buf_vbo_num_tris;
         dbg_note_draw(buf_vbo_num_tris);
@@ -248,6 +275,7 @@ static void gfx_flush(void) {
         /*if (t1 - t0 > 1000) {
             printf("f: %d %d\n", num, (int)(t1 - t0));
         }*/
+        dbg_time.flush_ns += dbg_now_ns() - flush_start;
     }
 }
 
@@ -557,6 +585,7 @@ static bool apply_replacement(struct TextureHashmapNode *n) {
         return false;
     }
     if (r == 2) {
+        dbg_time.uploads++;
         replacement_uploads++;
     }
     n->rserial = serial;
@@ -578,7 +607,15 @@ static void notify_drawn(const struct TileDesc *t, struct TextureHashmapNode *n)
     n->gen = tex_hooks->generation ? tex_hooks->generation() : 0;
 }
 
+static void import_texture_impl(int slot);
 static void import_texture(int slot) {
+    const uint64_t start = dbg_now_ns();
+    dbg_time.imports++;
+    import_texture_impl(slot);
+    dbg_time.import_ns += dbg_now_ns() - start;
+}
+
+static void import_texture_impl(int slot) {
     static uint8_t rgba[8192 * 4]; // a tile fits in 4 KB: at most 8192 4-bit texels
     const struct TileDesc *t = &rdp.tiles[(tex_level + slot) & 7];
     uint32_t x0, y0, w, h;
@@ -617,6 +654,7 @@ static void import_texture(int slot) {
         node->replaced = false;
         node->rserial = 0;
     } else if (tex_hooks != NULL && tex_hooks->drawn != NULL) {
+        dbg_time.misses++;
         notify_drawn(t, node);
         if (node->has_hash && tex_hooks->replace != NULL && apply_replacement(node)) {
             return;
@@ -2106,6 +2144,15 @@ static void dbg_end_frame(void) {
         fprintf(stderr, "[fast3d] frame %u: %u tasks, %u cmds, %u draws (%u tris), %u rects, %u unknown ops, %u extended cmds\n",
                 dbg.frame, dbg.stat_tasks, dbg.stat_cmds, dbg.stat_draws, dbg.stat_tris, dbg.stat_rects, dbg.stat_unknown, dbg.stat_ext);
     }
+    dbg_time.frames++;
+    if (dbg.frame % 300 == 0 && dbg_time.frames > 0) {
+        const double f = (double)dbg_time.frames;
+        fprintf(stderr, "[fast3d] timing, last %u frames, per frame: display lists %.2f ms (draw submits %.2f ms for %.0f flushes, "
+                "texture imports %.2f ms for %.0f imports, %.1f misses, %.1f replacement uploads)\n",
+                dbg_time.frames, dbg_time.run_ns / f / 1e6, dbg_time.flush_ns / f / 1e6, dbg_time.flushes / f,
+                dbg_time.import_ns / f / 1e6, dbg_time.imports / f, dbg_time.misses / f, dbg_time.uploads / f);
+        memset(&dbg_time, 0, sizeof(dbg_time));
+    }
     if (dbg.bin != NULL) fclose(dbg.bin);
     if (dbg.txt != NULL) fclose(dbg.txt);
     dbg.bin = NULL;
@@ -2406,8 +2453,10 @@ void gfx_run_task(uint32_t dl_addr) {
     memset(g_segments, 0, sizeof(g_segments));
     dl_depth = 0;
     dl_cmd_budget = 16u * 1024u * 1024u;
+    const uint64_t run_start = dbg_now_ns();
     gfx_run_dl((Gfx *)(g_rdram + (dl_addr & 0x1FFFFFFF)));
     gfx_flush();
+    dbg_time.run_ns += dbg_now_ns() - run_start;
 }
 
 // Re-applies every piece of GL state the core caches in rendering_state. Something else drew with the same GL context
