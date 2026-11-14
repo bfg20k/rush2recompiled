@@ -81,8 +81,10 @@ struct TextureHashmapNode {
     bool has_hash, replaced, seen_world;
 };
 static struct {
-    struct TextureHashmapNode *hashmap[1024];
-    struct TextureHashmapNode pool[512];
+    // A 2049 track draws over 900 distinct textures a frame; at 512 the cache emptied itself every frame and every
+    // texture was decoded and uploaded again (30-40 ms a frame). Sized for the biggest tracks (a node is ~64 bytes).
+    struct TextureHashmapNode *hashmap[TEXTURE_CACHE_BUCKETS];
+    struct TextureHashmapNode pool[TEXTURE_CACHE_NODES];
     uint32_t pool_pos;
 } gfx_texture_cache;
 
@@ -321,7 +323,7 @@ static struct ColorCombiner *gfx_lookup_or_create_color_combiner(uint64_t cc_id)
 
 static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, uint64_t orig_addr, uint32_t fmt, uint32_t siz) {
     size_t hash = (size_t)(orig_addr ^ (orig_addr >> 21) ^ (orig_addr >> 42));
-    hash &= 0x3ff;
+    hash &= TEXTURE_CACHE_BUCKETS - 1;
     struct TextureHashmapNode **node = &gfx_texture_cache.hashmap[hash];
     while (*node != NULL && *node - gfx_texture_cache.pool < (int)gfx_texture_cache.pool_pos) {
         if ((*node)->texture_key == orig_addr && (*node)->fmt == fmt && (*node)->siz == siz) {
