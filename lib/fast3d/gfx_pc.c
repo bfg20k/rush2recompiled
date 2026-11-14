@@ -2178,6 +2178,23 @@ static void dbg_end_frame(void) {
                 dbg.frame, dbg.stat_tasks, dbg.stat_cmds, dbg.stat_draws, dbg.stat_tris, dbg.stat_rects, dbg.stat_unknown, dbg.stat_ext);
     }
     dbg_time.frames++;
+    if (dbg_op_timing) {
+        dbg_op_timing = false;
+        dbg_op_last = -1;
+        fprintf(stderr, "[fast3d]   costliest commands this frame (opcode: ms, count):");
+        for (int n = 0; n < 8; n++) {
+            int best = -1;
+            for (int o = 0; o < 256; o++) {
+                if (dbg_op_ns[o] > 0 && (best < 0 || dbg_op_ns[o] > dbg_op_ns[best])) best = o;
+            }
+            if (best < 0) break;
+            fprintf(stderr, " %02X: %.2f (%u);", best, dbg_op_ns[best] / 1e6, dbg_op_count[best]);
+            dbg_op_ns[best] = 0;
+        }
+        fprintf(stderr, "\n");
+        memset(dbg_op_ns, 0, sizeof(dbg_op_ns));
+        memset(dbg_op_count, 0, sizeof(dbg_op_count));
+    }
     if (dbg.frame % 300 == 0 && dbg_time.frames > 0) {
         const double f = (double)dbg_time.frames;
         fprintf(stderr, "[fast3d] timing, last %u frames, per frame: display lists %.2f ms (draw submits %.2f ms for %.0f flushes, "
@@ -2199,6 +2216,13 @@ static void dbg_end_frame(void) {
     }
 }
 
+// One frame in 300 (the one before the timing line) is timed command by command: the time from one command's start to
+// the next's is charged to its opcode, and the frame's timing line lists the costliest opcodes.
+static bool dbg_op_timing;
+static uint64_t dbg_op_ns[256], dbg_op_last_ns;
+static unsigned dbg_op_count[256];
+static int dbg_op_last = -1;
+
 static void gfx_run_dl(Gfx* cmd) {
     int dummy = 0;
     for (;;) {
@@ -2207,6 +2231,13 @@ static void gfx_run_dl(Gfx* cmd) {
         }
         dl_cmd_budget--;
         uint32_t opcode = cmd->words.w0 >> 24;
+        if (dbg_op_timing) {
+            const uint64_t now = dbg_now_ns();
+            if (dbg_op_last >= 0) dbg_op_ns[dbg_op_last] += now - dbg_op_last_ns;
+            dbg_op_last = (int)opcode;
+            dbg_op_last_ns = now;
+            dbg_op_count[opcode]++;
+        }
         if (dbg.trace) {
             dbg_trace_cmd(cmd);
         }
@@ -2474,6 +2505,7 @@ struct GfxRenderingAPI *gfx_get_current_rendering_api(void) {
 
 void gfx_begin_frame(void) {
     replacement_uploads = 0;
+    dbg_op_timing = (dbg.frame + 1) % 300 == 0;
     dbg_begin_frame();
     gfx_rapi->start_frame();
 }
