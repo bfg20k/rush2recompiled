@@ -44,10 +44,10 @@ index 79dfc38..4a08a68 100644
  build_pixel_shader(  rt64 "src/shaders/Im3DPS.hlsl")
  build_pixel_shader(  rt64 "src/shaders/PostProcessPS.hlsl")
 diff --git a/include/rt64_extended_gbi.h b/include/rt64_extended_gbi.h
-index d387090..b098b04 100644
+index d387090..1bcdb04 100644
 --- a/include/rt64_extended_gbi.h
 +++ b/include/rt64_extended_gbi.h
-@@ -80,7 +80,14 @@
+@@ -80,7 +80,15 @@
  #define G_EX_SETVERTEXSEGMENT_V1        0x000031
  #define G_EX_SETTEXCOORDWRAPPOINT_V1    0x000032
  #define G_EX_SETRECTASPECT_V1           0x000033
@@ -59,11 +59,12 @@ index d387090..b098b04 100644
 +#define G_EX_SETTWOSIDEDWALLS_V1        0x000038
 +#define G_EX_SETCARLIGHT_V1             0x000039
 +#define G_EX_SETTWOSIDEDSKIP_V1         0x00003A
-+#define G_EX_MAX                        0x00003B
++#define G_EX_SETPARTICLELIGHT_V1        0x00003B
++#define G_EX_MAX                        0x00003C
  
  #define G_EX_ORIGIN_NONE            0x800
  #define G_EX_ORIGIN_LEFT            0x0
-@@ -579,4 +586,73 @@ typedef union {
+@@ -579,4 +587,85 @@ typedef union {
          PARAM(aspect, 2, 0) \
      )
  
@@ -134,6 +135,18 @@ index d387090..b098b04 100644
 +    G_EX_COMMAND1(cmd, \
 +        PARAM(RT64_EXTENDED_OPCODE, 8, 24) | PARAM(G_EX_SETCARLIGHT_V1, 24, 0), \
 +        PARAM(level, 8, 24) | PARAM(head_reach, 12, 12) | PARAM(tail_reach, 12, 0) \
++    )
++
++// Rush 2 recomp: the draws that follow are one particle (a puff of wheel dust or smoke) for the car lights
++// (gEXSetCarLight) to shine on. They are held back until the view's car light is on the scene behind them, then drawn
++// lit by the lamps at the particle's own place (its draw's world transform), as a dust cloud scatters light, rather
++// than taking the light of the surface behind them (FramebufferRenderer::submitRasterScene). id tells consecutive
++// particles apart (a new id starts a new draw, so each particle gets its own light); 0 ends. Lasts until the next
++// particle light command.
++#define gEXSetParticleLight(cmd, id) \
++    G_EX_COMMAND1(cmd, \
++        PARAM(RT64_EXTENDED_OPCODE, 8, 24) | PARAM(G_EX_SETPARTICLELIGHT_V1, 24, 0), \
++        PARAM(id, 16, 0) \
 +    )
 +
  #endif // RT64_EXTENDED_GBI
@@ -330,7 +343,7 @@ index 4857f22..5646b55 100644
  
      NLOHMANN_JSON_SERIALIZE_ENUM(UserConfiguration::InternalColorFormat, {
 diff --git a/src/gbi/rt64_gbi_extended.cpp b/src/gbi/rt64_gbi_extended.cpp
-index 20c0d4d..b8ddea1 100644
+index 20c0d4d..82927a8 100644
 --- a/src/gbi/rt64_gbi_extended.cpp
 +++ b/src/gbi/rt64_gbi_extended.cpp
 @@ -4,6 +4,9 @@
@@ -343,7 +356,7 @@ index 20c0d4d..b8ddea1 100644
  #include "../include/rt64_extended_gbi.h"
  
  namespace RT64 {
-@@ -331,6 +334,49 @@ namespace RT64 {
+@@ -331,6 +334,53 @@ namespace RT64 {
              state->rdp->setRectAspect(aspect);
          }
  
@@ -371,6 +384,10 @@ index 20c0d4d..b8ddea1 100644
 +            state->rdp->setCarLight((*dl)->w1);
 +        }
 +
++        void setParticleLightV1(State *state, DisplayList **dl) {
++            state->rdp->setParticleLight((*dl)->p1(0, 16));
++        }
++
 +        void setSkyDrawV1(State *state, DisplayList **dl) {
 +            state->rdp->setSkyDraw((*dl)->p1(0, 1) != 0);
 +        }
@@ -393,7 +410,7 @@ index 20c0d4d..b8ddea1 100644
          void noOpHook(State *state, DisplayList **dl) {
              uint32_t magicNumber = (*dl)->p0(0, 24);
              if (magicNumber == RT64_HOOK_MAGIC_NUMBER) {
-@@ -439,6 +485,13 @@ namespace RT64 {
+@@ -439,6 +489,14 @@ namespace RT64 {
              Map[G_EX_SETVERTEXSEGMENT_V1] = &setVertexSegmentV1;
              Map[G_EX_SETTEXCOORDWRAPPOINT_V1] = &setTexcoordWrapPointV1;
              Map[G_EX_SETRECTASPECT_V1] = &setRectAspectV1;
@@ -404,6 +421,7 @@ index 20c0d4d..b8ddea1 100644
 +            Map[G_EX_SETTWOSIDEDWALLS_V1] = &setTwoSidedWallsV1;
 +            Map[G_EX_SETCARLIGHT_V1] = &setCarLightV1;
 +            Map[G_EX_SETTWOSIDEDSKIP_V1] = &setTwoSidedSkipV1;
++            Map[G_EX_SETPARTICLELIGHT_V1] = &setParticleLightV1;
              MapInitialized = true;
          }
      }
@@ -487,10 +505,10 @@ index 785de27..3c40137 100644
          rasterShaderCache = std::make_unique<RasterShaderCache>(rasterShaderThreads, ubershaderThreads);
          rasterShaderCache->setup(device.get(), renderInterface->getCapabilities().shaderFormat, shaderLibrary.get(), multisampling);
 diff --git a/src/hle/rt64_draw_call.h b/src/hle/rt64_draw_call.h
-index 0e62be1..327966e 100644
+index 0e62be1..8f9e7ab 100644
 --- a/src/hle/rt64_draw_call.h
 +++ b/src/hle/rt64_draw_call.h
-@@ -65,6 +65,16 @@ namespace RT64 {
+@@ -65,6 +65,18 @@ namespace RT64 {
          uint32_t forceUpscale2D : 1;
          uint32_t forceTrueBilerp : 2;
          uint32_t forceScaleLOD : 1;
@@ -504,6 +522,8 @@ index 0e62be1..327966e 100644
 +        // Rush 2 recomp: a car light marker's color, strength and radius as gEXSetCarLight packs them, or 0 for a
 +        // draw that isn't one.
 +        uint32_t carLight;
++        // Rush 2 recomp: a particle for the car lights to shine on, its id (gEXSetParticleLight), or 0.
++        uint32_t particleLight;
      };
  
      struct DrawCall {
@@ -705,7 +725,7 @@ index 3227ab1..883cf36 100644
  
          ext.sharedResources->interpolatedCondition.notify_all();
 diff --git a/src/hle/rt64_rdp.cpp b/src/hle/rt64_rdp.cpp
-index a10c11a..29b26de 100644
+index a10c11a..69ac824 100644
 --- a/src/hle/rt64_rdp.cpp
 +++ b/src/hle/rt64_rdp.cpp
 @@ -627,6 +627,8 @@ namespace RT64 {
@@ -740,7 +760,7 @@ index a10c11a..29b26de 100644
  #   ifdef ASSERT_LOAD_METHODS
          assert((texture.siz == G_IM_SIZ_16b) && "Non-16 bit textures are not currently supported.");
          assert((t.siz == G_IM_SIZ_4b) && "Non-4 bit tiles are not currently supported.");
-@@ -1076,6 +1087,29 @@ namespace RT64 {
+@@ -1076,6 +1087,35 @@ namespace RT64 {
          state->updateDrawStatusAttribute(DrawAttribute::ExtendedFlags);
      }
  
@@ -767,11 +787,17 @@ index a10c11a..29b26de 100644
 +        state->updateDrawStatusAttribute(DrawAttribute::ExtendedFlags);
 +    }
 +
++    // Rush 2 recomp: a particle the car lights shine on (gEXSetParticleLight).
++    void RDP::setParticleLight(uint16_t id) {
++        extended.drawExtendedFlags.particleLight = id;
++        state->updateDrawStatusAttribute(DrawAttribute::ExtendedFlags);
++    }
++
      void RDP::clearExtended() {
          extended.scissorLeftOriginStack[0] = G_EX_ORIGIN_NONE;
          extended.scissorRightOriginStack[0] = G_EX_ORIGIN_NONE;
 diff --git a/src/hle/rt64_rdp.h b/src/hle/rt64_rdp.h
-index 84f4e7c..26db62c 100644
+index 84f4e7c..80aeb0b 100644
 --- a/src/hle/rt64_rdp.h
 +++ b/src/hle/rt64_rdp.h
 @@ -98,6 +98,8 @@ namespace RT64 {
@@ -783,13 +809,14 @@ index 84f4e7c..26db62c 100644
          } extended;
  
          struct {
-@@ -199,6 +201,10 @@ namespace RT64 {
+@@ -199,6 +201,11 @@ namespace RT64 {
          void forceUpscale2D(bool force);
          void forceTrueBilerp(uint8_t mode);
          void forceScaleLOD(bool force);
 +        void setCarReflection(uint8_t group);
 +        void setSkyFog(uint16_t haze);
 +        void setCarLight(uint32_t light);
++        void setParticleLight(uint16_t id);
 +        void setSkyDraw(bool on);
          void clearExtended();
  
@@ -1608,7 +1635,7 @@ index 69a82ac..478fd47 100644
          uint32_t TMEM;
          uint32_t RGBA32;
 diff --git a/src/render/rt64_framebuffer_renderer.cpp b/src/render/rt64_framebuffer_renderer.cpp
-index 9fae0d4..6f3726b 100644
+index 9fae0d4..485e7be 100644
 --- a/src/render/rt64_framebuffer_renderer.cpp
 +++ b/src/render/rt64_framebuffer_renderer.cpp
 @@ -4,14 +4,20 @@
@@ -1707,10 +1734,20 @@ index 9fae0d4..6f3726b 100644
              }
          }
      }
-@@ -508,14 +539,437 @@ namespace RT64 {
+@@ -470,7 +501,7 @@ namespace RT64 {
+         bool previousVertexTestZ = false;
+         const RenderPipeline *previousPipeline = nullptr;
+         RenderRect previousScissor;
+-        interop::RasterParams rasterParams;
++        interop::RasterParams rasterParams = {};
+         RenderDescriptorSet *descRealFbSet = framebuffer.descRealFbSet->get();
+         RenderDescriptorSet *descDummyFbSet = framebuffer.descDummyFbSet->get();
+ 
+@@ -508,92 +539,684 @@ namespace RT64 {
              }
          };
  
+-        if (fbStorage->colorTarget != nullptr) {
 +        // Rush 2 recomp: ambient occlusion. Once the 3D draws that add to it end (at a 2D draw, a clear or the end of the
 +        // scene), the first pass reads the depth buffer into the storage's occlusion target at half resolution (a quarter
 +        // of the pixels: it was most of the effect's cost), and the second multiplies its blur, upsampled by depth, into
@@ -1808,9 +1845,36 @@ index 9fae0d4..6f3726b 100644
 +
 +            // Back to the scene's framebuffer, with the depth buffer still read only.
 +            worker->commandList->setFramebuffer(fbStorage->colorWriteDepthRead.get());
-+            switchToGraphicsPipeline();
+             switchToGraphicsPipeline();
+-        }
+-        
+-        for (uint32_t i : rasterScene.instanceIndices) {
+-            const InstanceDrawCall &drawCall = instanceDrawCallVector[i];
+-            switch (drawCall.type) {
+-            case InstanceDrawCall::Type::IndexedTriangles: 
+-            case InstanceDrawCall::Type::RawTriangles:
+-            case InstanceDrawCall::Type::RegularRect: {
+-                assert(fbStorage->colorTarget != nullptr);
 +        };
-+
+ 
+-                const bool typeDifferent = (drawCall.type != previousCallType);
+-                const bool testZDifferent = (drawCall.type == InstanceDrawCall::Type::IndexedTriangles) && (drawCall.triangles.vertexTestZ != previousVertexTestZ);
+-                if (typeDifferent || testZDifferent) {
+-                    switch (drawCall.type) {
+-                    case InstanceDrawCall::Type::IndexedTriangles:
+-                        worker->commandList->setVertexBuffers(0, indexedVertexViews.data(), uint32_t(indexedVertexViews.size()), vertexInputSlots.data());
+-                        worker->commandList->setIndexBuffer(drawCall.triangles.vertexTestZ ? &testZIndexBufferView : &indexBufferView);
+-                        previousVertexTestZ = drawCall.triangles.vertexTestZ;
+-                        break;
+-                    case InstanceDrawCall::Type::RawTriangles:
+-                    case InstanceDrawCall::Type::RegularRect:
+-                        worker->commandList->setVertexBuffers(0, rawVertexViews.data(), uint32_t(rawVertexViews.size()), vertexInputSlots.data());
+-                        worker->commandList->setIndexBuffer(nullptr);
+-                        break;
+-                    default:
+-                        assert(false && "Unknown draw call type.");
+-                        break;
+-                    };
 +        // Rush 2 recomp: sky fog. A view's pass runs once, right after its last sky draw, over the area its marked draws
 +        // covered so far: it blends the fog color over the pixels still at the depth clear (SkyFogPS.hlsl). Running
 +        // there, not after the view's last draw, keeps see-through things drawn later without depth writes (sails,
@@ -1824,7 +1888,8 @@ index 9fae0d4..6f3726b 100644
 +            if ((skyFogIndex < 0) || (colorTarget == nullptr) || (depthTarget == nullptr)) {
 +                return;
 +            }
-+
+ 
+-                    previousCallType = drawCall.type;
 +            SkyFogPass &pass = skyFogPasses[skyFogIndex];
 +            if (pass.done || !pass.fogged || !pass.hasSky || !pass.rectSet || (pass.cb.haze <= 0.0f)) {
 +                return;
@@ -1896,9 +1961,11 @@ index 9fae0d4..6f3726b 100644
 +                    total.top = std::min(total.top, r.top);
 +                    total.right = std::max(total.right, r.right);
 +                    total.bottom = std::max(total.bottom, r.bottom);
-+                }
+                 }
 +            };
-+
+ 
+-                const auto &triangles = drawCall.triangles;
+-                assert(triangles.pipeline != nullptr);
 +            // Each pass's boxes clipped to the target, the light's then in half resolution pixels (its full resolution
 +            // box halved outward). area: every full resolution pixel either reaches (the composite's).
 +            RenderRect area;
@@ -1918,11 +1985,14 @@ index 9fae0d4..6f3726b 100644
 +                        pass.rect = RenderRect(pass.rect.left / 2, pass.rect.top / 2, (pass.rect.right + 1) / 2, (pass.rect.bottom + 1) / 2);
 +                        anyLight = true;
 +                    }
-+
+ 
+-                // Draw calls can sometimes end up with empty scissors and cause validation errors. We just skip them.
+-                if (triangles.scissor.isEmpty()) {
+-                    continue;
 +                    if (!pass.glowRect.isEmpty()) {
 +                        grow(area, anyArea, pass.glowRect);
 +                    }
-+                }
+                 }
 +            }
 +
 +            if (!anyArea || (anyCB == nullptr)) {
@@ -1930,8 +2000,9 @@ index 9fae0d4..6f3726b 100644
 +                return;
 +            }
 +
-+            // The composite reads the light's pixels round each of its own, one past its half of the area: cleared too.
-+            const RenderRect lightClear(std::max(area.left / 2 - 1, 0), std::max(area.top / 2 - 1, 0), std::min((area.right + 1) / 2 + 1, halfWidth), std::min((area.bottom + 1) / 2 + 1, halfHeight));
++            // The composite reads the light's pixels round each of its own (at an edge, those within 3 full resolution
++            // pixels), up to two past its half of the area: cleared too.
++            const RenderRect lightClear(std::max(area.left / 2 - 2, 0), std::max(area.top / 2 - 2, 0), std::min((area.right + 1) / 2 + 2, halfWidth), std::min((area.bottom + 1) / 2 + 2, halfHeight));
 +
 +            const bool timed = (carLightQueryPool != nullptr) && (carLightQueryCount < CarLightQueryLimit);
 +            if (timed) {
@@ -1983,7 +2054,13 @@ index 9fae0d4..6f3726b 100644
 +                RenderTextureBarrier(fbStorage->carLightTexture.get(), RenderTextureLayout::COLOR_WRITE),
 +                RenderTextureBarrier(fbStorage->carGlowTexture.get(), RenderTextureLayout::COLOR_WRITE)
 +            };
-+
+ 
+-                // A new pass must be started if decals are required and something wrote to the depth buffer before this call.
+-                const interop::OtherMode otherMode = triangles.shaderDesc.otherMode;
+-                bool depthDecal = (otherMode.zMode() == ZMODE_DEC);
+-                bool depthWrite = otherMode.zUpd();
+-                if (depthDecal) {
+-                    switchToDepthRead();
 +            worker->commandList->barriers(RenderBarrierStage::GRAPHICS, lightWrite, uint32_t(std::size(lightWrite)));
 +
 +            // The lamps' light, at half resolution.
@@ -2007,7 +2084,9 @@ index 9fae0d4..6f3726b 100644
 +                        worker->commandList->setGraphicsPushConstants(0, &pass.cb);
 +                        worker->commandList->drawInstanced(3, 1, 0, 0);
 +                    }
-+                }
+                 }
+-                else if (!depthDecal && depthWrite) {
+-                    switchToDepthWrite();
 +            }
 +
 +            if (timed) {
@@ -2033,13 +2112,16 @@ index 9fae0d4..6f3726b 100644
 +                    worker->commandList->setScissors(pass.glowRect);
 +                    worker->commandList->setGraphicsPushConstants(0, &pass.cb);
 +                    worker->commandList->drawInstanced(3, 1, 0, 0);
-+                }
+                 }
 +            }
 +
 +            if (timed) {
 +                worker->commandList->writeTimestamp(carLightQueryPool, 2 + carLightQueryCount * CarLightQueryStride + 2);
 +            }
-+
+ 
+-                if (previousScissor != triangles.scissor) {
+-                    worker->commandList->setScissors(triangles.scissor);
+-                    previousScissor = triangles.scissor;
 +            // The scene's copy.
 +            RenderTextureBarrier beforeCopy[] = {
 +                RenderTextureBarrier(fbStorage->carLightTexture.get(), RenderTextureLayout::SHADER_READ),
@@ -2088,13 +2170,267 @@ index 9fae0d4..6f3726b 100644
 +            switchToGraphicsPipeline();
 +        };
 +
-         if (fbStorage->colorTarget != nullptr) {
-             switchToGraphicsPipeline();
-         }
--        
++        // The draw of a triangles call (by its index in instanceDrawCallVector).
++        auto drawTriangles = [&](uint32_t i) {
++            const InstanceDrawCall &drawCall = instanceDrawCallVector[i];
++            assert(fbStorage->colorTarget != nullptr);
 +
-         for (uint32_t i : rasterScene.instanceIndices) {
-             const InstanceDrawCall &drawCall = instanceDrawCallVector[i];
++            const bool typeDifferent = (drawCall.type != previousCallType);
++            const bool testZDifferent = (drawCall.type == InstanceDrawCall::Type::IndexedTriangles) && (drawCall.triangles.vertexTestZ != previousVertexTestZ);
++            if (typeDifferent || testZDifferent) {
++                switch (drawCall.type) {
++                case InstanceDrawCall::Type::IndexedTriangles:
++                    worker->commandList->setVertexBuffers(0, indexedVertexViews.data(), uint32_t(indexedVertexViews.size()), vertexInputSlots.data());
++                    worker->commandList->setIndexBuffer(drawCall.triangles.vertexTestZ ? &testZIndexBufferView : &indexBufferView);
++                    previousVertexTestZ = drawCall.triangles.vertexTestZ;
++                    break;
++                case InstanceDrawCall::Type::RawTriangles:
++                case InstanceDrawCall::Type::RegularRect:
++                    worker->commandList->setVertexBuffers(0, rawVertexViews.data(), uint32_t(rawVertexViews.size()), vertexInputSlots.data());
++                    worker->commandList->setIndexBuffer(nullptr);
++                    break;
++                default:
++                    assert(false && "Unknown draw call type.");
++                    break;
++                };
++
++                previousCallType = drawCall.type;
++            }
++
++            const auto &triangles = drawCall.triangles;
++            assert(triangles.pipeline != nullptr);
++
++            // Draw calls can sometimes end up with empty scissors and cause validation errors. We just skip them.
++            if (triangles.scissor.isEmpty()) {
++                return;
++            }
++
++            // Rush 2 recomp: car paint marked for reflections draws with its view's cube map instead of its own
++            // combiner. The cube map is drawn before the view's first marked draw.
++            if (triangles.reflectionIndex >= 0) {
++                CarReflectionScene &reflectionScene = carReflectionScenes[triangles.reflectionIndex];
++                if (!reflectionScene.drawn) {
++                    submitCarReflection(worker, framebuffer, fbStorage, reflectionScene);
++                    reflectionScene.drawn = true;
++                    worker->commandList->setFramebuffer(depthState ? fbStorage->colorWriteDepthRead.get() : fbStorage->colorDepthWrite.get());
+                 }
+ 
+-                if (previousPipeline != triangles.pipeline) {
+-                    worker->commandList->setPipeline(triangles.pipeline);
+-                    previousPipeline = triangles.pipeline;
++                switchToGraphicsPipeline();
++                switchToDepthRead();
++                drawCarReflection(worker, framebuffer, fbStorage, drawCall);
++                switchToGraphicsPipeline();
++                return;
++            }
++
++            // A new pass must be started if decals are required and something wrote to the depth buffer before this call.
++            const interop::OtherMode otherMode = triangles.shaderDesc.otherMode;
++            bool depthDecal = (otherMode.zMode() == ZMODE_DEC);
++            bool depthWrite = otherMode.zUpd();
++            if (depthDecal) {
++                switchToDepthRead();
++            }
++            else if (!depthDecal && depthWrite) {
++                switchToDepthWrite();
++            }
++
++            if (previousScissor != triangles.scissor) {
++                worker->commandList->setScissors(triangles.scissor);
++                previousScissor = triangles.scissor;
++            }
++
++            if (previousPipeline != triangles.pipeline) {
++                worker->commandList->setPipeline(triangles.pipeline);
++                previousPipeline = triangles.pipeline;
++            }
++            
++            rasterParams.renderIndex = i;
++            rasterParams.screenScale = triangles.screenScale;
++            rasterParams.screenOffset = triangles.screenOffset;
++            worker->commandList->setGraphicsPushConstants(0, &rasterParams);
++
++            drawCallTriangles(drawCall);
++
++            if (triangles.occlusionIndex >= 0) {
++                if (pendingOcclusion < 0) {
++                    occlusionRect = triangles.scissor;
++                }
++                else {
++                    occlusionRect.left = std::min(occlusionRect.left, triangles.scissor.left);
++                    occlusionRect.top = std::min(occlusionRect.top, triangles.scissor.top);
++                    occlusionRect.right = std::max(occlusionRect.right, triangles.scissor.right);
++                    occlusionRect.bottom = std::max(occlusionRect.bottom, triangles.scissor.bottom);
++                }
++
++                pendingOcclusion = triangles.occlusionIndex;
++            }
++
++            // Simulate dither noise.
++            if (triangles.postBlendDitherNoise) {
++                if (triangles.postBlendDitherNoiseNegative) {
++                    worker->commandList->setPipeline(postBlendDitherNoiseSubNegativePipeline);
++                }
++                else {
++                    worker->commandList->setPipeline(postBlendDitherNoiseAddPipeline);
++                    drawCallTriangles(drawCall);
++
++                    worker->commandList->setPipeline(postBlendDitherNoiseSubPipeline);
+                 }
+-                
+-                rasterParams.renderIndex = i;
+-                rasterParams.screenScale = triangles.screenScale;
+-                rasterParams.screenOffset = triangles.screenOffset;
+-                worker->commandList->setGraphicsPushConstants(0, &rasterParams);
+ 
+                 drawCallTriangles(drawCall);
++                previousPipeline = nullptr;
++            }
++        };
+ 
+-                // Simulate dither noise.
+-                if (triangles.postBlendDitherNoise) {
+-                    if (triangles.postBlendDitherNoiseNegative) {
+-                        worker->commandList->setPipeline(postBlendDitherNoiseSubNegativePipeline);
++        // Rush 2 recomp: particles the car lights shine on (gEXSetParticleLight). Drawn where they are, they would sit on
++        // the scene before the car light composite, which lights each pixel as the surface the depth buffer holds there
++        // (the road behind a puff of dust: its light, at the dust's color taken for an albedo), so a cloud in a beam
++        // went flat white. They are held back until the 3D draws they are among end, drawn after the view's light, and
++        // lit as a cloud scatters light: each by the lamps of its own view at its own place (the light shapes and
++        // falloff of CarLightPS.hlsl, without the Lambert term or shadow), eased like a surface's light
++        // (CarLightCompositePS.hlsl), times ParticleScatter, and put on its color in RasterPS.hlsl.
++        std::vector<uint32_t> heldParticles;
++        std::vector<int32_t> particleLightGroups;
++        auto particleLightOf = [&](const InstanceDrawCall &drawCall) -> interop::float4 {
++            // The share of a lamp's light a puff scatters toward the camera, against a surface square to the lamp.
++            const float ParticleScatter = 0.5f;
++            const float UnitsPerFoot = 16.0f;
++            const float SpotAcross = 0.52f, SpotBelow = 0.065f, SpotAbove = 0.025f;
++            const auto &triangles = drawCall.triangles;
++            const float *p = triangles.particleRel;
++            float light[3] = { 0.0f, 0.0f, 0.0f };
++            float level = 0.0f;
++            auto cross = [](const float a[3], const float b[3], float out[3]) {
++                out[0] = a[1] * b[2] - a[2] * b[1];
++                out[1] = a[2] * b[0] - a[0] * b[2];
++                out[2] = a[0] * b[1] - a[1] * b[0];
++            };
++
++            auto unit = [](float v[3]) {
++                const float length = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
++                if (length > 1e-12f) {
++                    for (uint32_t j = 0; j < 3; j++) {
++                        v[j] /= length;
+                     }
+-                    else {
+-                        worker->commandList->setPipeline(postBlendDitherNoiseAddPipeline);
+-                        drawCallTriangles(drawCall);
++                }
++            };
+ 
+-                        worker->commandList->setPipeline(postBlendDitherNoiseSubPipeline);
++            for (int32_t groupIndex : particleLightGroups) {
++                const CarLightGroup &g = carLightGroups[groupIndex];
++                if ((std::fabs(g.viewX - triangles.particleViewX) > 0.5f) || (std::fabs(g.viewY - triangles.particleViewY) > 0.5f)) {
++                    continue;
++                }
++
++                level = g.level;
++                for (uint32_t k = 0; k < g.count; k++) {
++                    // The light passes (a glow pass has its strength in screen.w).
++                    const interop::CarLightCB &cb = carLightPasses[g.first + k].cb;
++                    if (cb.screen.w != 0.0f) {
++                        continue;
+                     }
+ 
+-                    drawCallTriangles(drawCall);
+-                    previousPipeline = nullptr;
++                    const bool headlamp = cb.color.w > 0.5f;
++                    const float axis[3] = { cb.direction.x, cb.direction.y, cb.direction.z };
++                    const float up[3] = { cb.up.x, cb.up.y, cb.up.z };
++                    const float center[3] = { cb.light.x, cb.light.y, cb.light.z };
++                    float side[3], upright[3];
++                    cross(up, axis, side);
++                    unit(side);
++                    cross(axis, side, upright);
++                    const float range = cb.light.w;
++                    const float halfGap = cb.dirW.w;
++                    for (int lamp = 0; lamp < ((halfGap != 0.0f) ? 2 : 1); lamp++) {
++                        const float sign = (halfGap == 0.0f) ? 0.0f : ((lamp == 0) ? -1.0f : 1.0f);
++                        float d[3];
++                        for (uint32_t j = 0; j < 3; j++) {
++                            d[j] = p[j] - (center[j] + side[j] * halfGap * sign);
++                        }
++
++                        const float distance = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
++                        if ((distance >= range) || (distance <= 1e-3f)) {
++                            continue;
++                        }
++
++                        for (uint32_t j = 0; j < 3; j++) {
++                            d[j] /= distance;
++                        }
++
++                        const float along = d[0] * axis[0] + d[1] * axis[1] + d[2] * axis[2];
++                        float shape = 0.0f;
++                        if (headlamp) {
++                            if (along > 0.05f) {
++                                const float across = (d[0] * side[0] + d[1] * side[1] + d[2] * side[2]) / along;
++                                const float upward = (d[0] * upright[0] + d[1] * upright[1] + d[2] * upright[2]) / along;
++                                const float spread = (upward > 0.0f) ? SpotAbove : SpotBelow;
++                                shape = std::exp(-(across * across) / (SpotAcross * SpotAcross) - (upward * upward) / (spread * spread));
++                                shape += 0.01f * std::min(std::max(along, 0.0f), 1.0f) * std::exp(-(across * across) / 0.8f);
++                            }
++                        }
++                        else {
++                            const float lobe = std::min(std::max(0.3f + 0.7f * along, 0.0f), 1.0f);
++                            shape = lobe * lobe;
++                        }
++
++                        const float beyond = along * distance / UnitsPerFoot;
++                        shape *= std::min(std::max((beyond - 0.3f) / 0.7f, 0.0f), 1.0f);
++                        const float ratio = distance / range;
++                        const float ratio2 = ratio * ratio;
++                        const float window = std::min(std::max(1.0f - ratio2 * ratio2, 0.0f), 1.0f);
++                        const float feet = distance / UnitsPerFoot;
++                        const float strength = shape * window * window / (feet * feet + 1.0f);
++                        light[0] += cb.color.x * strength;
++                        light[1] += cb.color.y * strength;
++                        light[2] += cb.color.z * strength;
++                    }
+                 }
++            }
+ 
++            const float peak = std::max(light[0], std::max(light[1], light[2]));
++            if ((level <= 0.0f) || (peak < (1.0f / 1024.0f))) {
++                return interop::float4(0.0f, 0.0f, 0.0f, 0.0f);
++            }
++
++            const float ease = ParticleScatter / (1.0f + peak / 1.5f);
++            return interop::float4(light[0] * ease, light[1] * ease, light[2] * ease, 1.0f / std::max(level, 0.05f));
++        };
++
++        // The end of a run of 3D draws: the car light, then the particles held back, lit by it.
++        auto finish3D = [&]() {
++            particleLightGroups = pendingCarLights;
++            submitCarLights();
++            for (uint32_t i : heldParticles) {
++                rasterParams.particleLight = particleLightOf(instanceDrawCallVector[i]);
++                drawTriangles(i);
++            }
++
++            rasterParams.particleLight = interop::float4(0.0f, 0.0f, 0.0f, 0.0f);
++            heldParticles.clear();
++            particleLightGroups.clear();
++        };
++
++        if (fbStorage->colorTarget != nullptr) {
++            switchToGraphicsPipeline();
++        }
++
++        for (uint32_t i : rasterScene.instanceIndices) {
++            const InstanceDrawCall &drawCall = instanceDrawCallVector[i];
 +            if (dueSkyFog >= 0) {
 +                submitSkyFog();
 +            }
@@ -2105,6 +2441,12 @@ index 9fae0d4..6f3726b 100644
 +                    pendingCarLights.push_back(drawCall.triangles.carLightIndex);
 +                }
 +
++                continue;
++            }
++
++            // Rush 2 recomp: a particle for the car lights waits for them (finish3D).
++            if ((drawCall.type == InstanceDrawCall::Type::IndexedTriangles) && drawCall.triangles.particle) {
++                heldParticles.push_back(i);
 +                continue;
 +            }
 +
@@ -2137,73 +2479,30 @@ index 9fae0d4..6f3726b 100644
 +                submitOcclusion();
 +            }
 +
-+            if (!pendingCarLights.empty() && ends3D) {
-+                submitCarLights();
++            if ((!pendingCarLights.empty() || !heldParticles.empty()) && ends3D) {
++                finish3D();
 +            }
 +
-             switch (drawCall.type) {
--            case InstanceDrawCall::Type::IndexedTriangles: 
++            switch (drawCall.type) {
 +            case InstanceDrawCall::Type::IndexedTriangles:
-             case InstanceDrawCall::Type::RawTriangles:
-             case InstanceDrawCall::Type::RegularRect: {
-                 assert(fbStorage->colorTarget != nullptr);
-@@ -550,6 +1004,23 @@ namespace RT64 {
-                     continue;
-                 }
- 
-+                // Rush 2 recomp: car paint marked for reflections draws with its view's cube map instead of its own
-+                // combiner. The cube map is drawn before the view's first marked draw.
-+                if (triangles.reflectionIndex >= 0) {
-+                    CarReflectionScene &reflectionScene = carReflectionScenes[triangles.reflectionIndex];
-+                    if (!reflectionScene.drawn) {
-+                        submitCarReflection(worker, framebuffer, fbStorage, reflectionScene);
-+                        reflectionScene.drawn = true;
-+                        worker->commandList->setFramebuffer(depthState ? fbStorage->colorWriteDepthRead.get() : fbStorage->colorDepthWrite.get());
-+                    }
-+
-+                    switchToGraphicsPipeline();
-+                    switchToDepthRead();
-+                    drawCarReflection(worker, framebuffer, fbStorage, drawCall);
-+                    switchToGraphicsPipeline();
-+                    continue;
-+                }
-+
-                 // A new pass must be started if decals are required and something wrote to the depth buffer before this call.
-                 const interop::OtherMode otherMode = triangles.shaderDesc.otherMode;
-                 bool depthDecal = (otherMode.zMode() == ZMODE_DEC);
-@@ -578,6 +1049,20 @@ namespace RT64 {
- 
-                 drawCallTriangles(drawCall);
- 
-+                if (triangles.occlusionIndex >= 0) {
-+                    if (pendingOcclusion < 0) {
-+                        occlusionRect = triangles.scissor;
-+                    }
-+                    else {
-+                        occlusionRect.left = std::min(occlusionRect.left, triangles.scissor.left);
-+                        occlusionRect.top = std::min(occlusionRect.top, triangles.scissor.top);
-+                        occlusionRect.right = std::max(occlusionRect.right, triangles.scissor.right);
-+                        occlusionRect.bottom = std::max(occlusionRect.bottom, triangles.scissor.bottom);
-+                    }
-+
-+                    pendingOcclusion = triangles.occlusionIndex;
-+                }
-+
-                 // Simulate dither noise.
-                 if (triangles.postBlendDitherNoise) {
-                     if (triangles.postBlendDitherNoiseNegative) {
-@@ -638,6 +1123,10 @@ namespace RT64 {
++            case InstanceDrawCall::Type::RawTriangles:
++            case InstanceDrawCall::Type::RegularRect: {
++                drawTriangles(i);
+                 break;
+             };
+             case InstanceDrawCall::Type::FillRect: {
+@@ -638,6 +1261,10 @@ namespace RT64 {
              }
          }
  
 +        submitSkyFog();
 +        submitOcclusion();
-+        submitCarLights();
++        finish3D();
 +
          // Mark targets for resolve.
          if (fbStorage->colorTarget != nullptr) {
              fbStorage->colorTarget->markForResolve();
-@@ -1316,6 +1805,533 @@ namespace RT64 {
+@@ -1316,6 +1943,533 @@ namespace RT64 {
      }
  #endif
  
@@ -2737,7 +3036,7 @@ index 9fae0d4..6f3726b 100644
      void FramebufferRenderer::addFramebuffer(const DrawParams &p) {
          assert(p.fbStorage != nullptr);
          
-@@ -1450,8 +2466,18 @@ namespace RT64 {
+@@ -1450,8 +2604,18 @@ namespace RT64 {
          uint32_t vertexTestZFaceIndicesStart = 0;
          int32_t vertexTestZCallIndex = -1;
          RenderViewport viewportClip;
@@ -2756,7 +3055,7 @@ index 9fae0d4..6f3726b 100644
              if (proj.scissorRect.isNull()) {
                  continue;
              }
-@@ -1506,6 +2532,441 @@ namespace RT64 {
+@@ -1506,6 +2670,443 @@ namespace RT64 {
                  viewportClip = convertViewportRect(viewport.rect(viewportClipRatios), p.resolutionScale, p.fbWidth, projInvRatioScale, extOriginPercentage, 0.0f, viewportOrigin, viewportOrigin);
              }
  
@@ -2968,6 +3267,8 @@ index 9fae0d4..6f3726b 100644
 +                CarLightGroup group;
 +                group.first = uint32_t(carLightPasses.size());
 +                group.level = level;
++                group.viewX = view.rect.x;
++                group.viewY = view.rect.y;
 +
 +                // The marker's lamps: where each is from the camera, where on the car, its color and kind.
 +                struct Lamp {
@@ -3198,7 +3499,7 @@ index 9fae0d4..6f3726b 100644
              for (uint32_t d = 0; (d < proj.gameCallCount) && (globalCallIndex < p.maxGameCall); d++) {
                  const GameCall &call = proj.gameCalls[d];
                  renderIndices.instanceIndex = call.callDesc.callIndex;
-@@ -1623,6 +3084,20 @@ namespace RT64 {
+@@ -1623,6 +3224,21 @@ namespace RT64 {
                          triangles.vertexTestZ = (vertexTestZCallIndex >= 0);
                          triangles.postBlendDitherNoise = false;
  
@@ -3211,6 +3512,7 @@ index 9fae0d4..6f3726b 100644
 +                        triangles.reflectionCar = -1;
 +                        triangles.skyFogIndex = -1;
 +                        triangles.carLightIndex = -1;
++                        triangles.particle = false;
 +                        if (perspectiveProj && !callCopyMode && (callOtherMode.zMode() != ZMODE_DEC) && callOtherMode.zUpd() &&
 +                            !interop::Blender::usesAlphaBlend(callOtherMode)) {
 +                            triangles.occlusionIndex = projOcclusionIndex;
@@ -3219,7 +3521,7 @@ index 9fae0d4..6f3726b 100644
                          float invRatioScale = 1.0f / aspectRatioScale;
                          float horizontalMisalignment = 0.0f;
                          switch (proj.type) {
-@@ -1747,6 +3222,45 @@ namespace RT64 {
+@@ -1747,6 +3363,63 @@ namespace RT64 {
  #           endif
                  {
                      rasterScene.instanceIndices.push_back(instanceIndex);
@@ -3261,11 +3563,29 @@ index 9fae0d4..6f3726b 100644
 +                                instanceDrawCall.triangles.skyFogIndex = skyFogIndex;
 +                            }
 +                        }
++
++                        // Rush 2 recomp: a particle for the car lights (gEXSetParticleLight): where it is from the camera,
++                        // its draw's world transform's origin (the interpolated frame's, as the lamps' are).
++                        if (call.callDesc.extendedFlags.particleLight != 0) {
++                            const ViewRecon &view = viewReconOf();
++                            const uint16_t t = call.callDesc.maxWorldMatrix;
++                            if (view.ok && (t < drawData.worldTransforms.size())) {
++                                const interop::float4x4 &world = (t < drawData.lerpWorldTransforms.size()) ? drawData.lerpWorldTransforms[t] : drawData.worldTransforms[t];
++                                const float ow = (world[3][3] != 0.0f) ? world[3][3] : 1.0f;
++                                for (uint32_t j = 0; j < 3; j++) {
++                                    instanceDrawCall.triangles.particleRel[j] = world[3][j] / ow - view.camera[j];
++                                }
++
++                                instanceDrawCall.triangles.particleViewX = view.rect.x;
++                                instanceDrawCall.triangles.particleViewY = view.rect.y;
++                                instanceDrawCall.triangles.particle = true;
++                            }
++                        }
 +                    }
                  }
  
                  instanceDrawCallVector.push_back(instanceDrawCall);
-@@ -1754,6 +3268,8 @@ namespace RT64 {
+@@ -1754,6 +3427,8 @@ namespace RT64 {
              }
          }
  
@@ -3275,7 +3595,7 @@ index 9fae0d4..6f3726b 100644
          checkRtScene(rtScene);
  #   endif
 diff --git a/src/render/rt64_framebuffer_renderer.h b/src/render/rt64_framebuffer_renderer.h
-index 3add9c3..773192d 100644
+index 3add9c3..01cd20a 100644
 --- a/src/render/rt64_framebuffer_renderer.h
 +++ b/src/render/rt64_framebuffer_renderer.h
 @@ -5,12 +5,17 @@
@@ -3296,7 +3616,7 @@ index 3add9c3..773192d 100644
  #include "shared/rt64_frame_params.h"
  #include "shared/rt64_gpu_tile.h"
  #include "shared/rt64_render_indices.h"
-@@ -58,6 +63,86 @@ namespace RT64 {
+@@ -58,6 +63,89 @@ namespace RT64 {
          uint32_t indexCount;
      };
  
@@ -3378,12 +3698,15 @@ index 3add9c3..773192d 100644
 +        uint32_t first = 0;
 +        uint32_t count = 0;
 +        float level = 1.0f;
++        // The view the marker is drawn in: its viewport's top left (split screen draws a marker in each view).
++        float viewX = 0.0f;
++        float viewY = 0.0f;
 +    };
 +
      struct FramebufferRenderer {
          std::vector<uint32_t> textureCacheVersions;
          std::vector<Texture *> textureCacheTextures;
-@@ -67,6 +152,16 @@ namespace RT64 {
+@@ -67,6 +155,16 @@ namespace RT64 {
          uint32_t textureCacheGlobalVersion = 0;
          bool textureCacheReplacementMapEnabled = false;
          std::vector<InstanceDrawCall> instanceDrawCallVector;
@@ -3400,7 +3723,7 @@ index 3add9c3..773192d 100644
          std::vector<RenderPipelineProgram> hitGroupVector;
          std::vector<interop::RenderIndices> renderIndicesVector;
          std::vector<DynamicTextureView> dynamicTextureViewVector;
-@@ -165,6 +260,9 @@ namespace RT64 {
+@@ -165,6 +263,9 @@ namespace RT64 {
          void submitRSPSmoothNormalCompute(RenderWorker *worker, const OutputBuffers *outputBuffers);
          bool submitDepthAccess(RenderWorker *worker, RenderFramebufferStorage *fbStorage, bool readOnly, bool &depthState);
          void submitRasterScene(RenderWorker *worker, const Framebuffer &framebuffer, RenderFramebufferStorage *fbStorage, const RasterScene &rasterScene, bool &depthState);
@@ -3411,10 +3734,10 @@ index 3add9c3..773192d 100644
          void endFramebuffers(RenderWorker *worker, const DrawBuffers *drawBuffers, const OutputBuffers *outputBuffers, bool rtEnabled);
          void recordSetup(RenderWorker *worker, std::vector<BufferUploader *> bufferUploaders, RSPProcessor *rspProcessor, VertexProcessor *vertexProcessor, const OutputBuffers *outputBuffers, bool rtEnabled);
 diff --git a/src/render/rt64_framebuffer_renderer_call.h b/src/render/rt64_framebuffer_renderer_call.h
-index f2eee70..721f9b9 100644
+index f2eee70..9b2b8fe 100644
 --- a/src/render/rt64_framebuffer_renderer_call.h
 +++ b/src/render/rt64_framebuffer_renderer_call.h
-@@ -41,6 +41,21 @@ namespace RT64 {
+@@ -41,6 +41,28 @@ namespace RT64 {
                  bool vertexTestZ : 1;
                  bool postBlendDitherNoise : 1;
                  bool postBlendDitherNoiseNegative : 1;
@@ -3433,6 +3756,13 @@ index f2eee70..721f9b9 100644
 +                // Rush 2 recomp: a car light marker (gEXSetCarLight), not drawn: its lamps
 +                // (FramebufferRenderer::carLightGroups), -2 for one with nothing to light, or -1 for an ordinary draw.
 +                int32_t carLightIndex;
++                // Rush 2 recomp: a particle the car lights shine on (gEXSetParticleLight), drawn after them, and where
++                // it is from the camera (its draw's world transform), in the lamps' frame (CarLightCB::light).
++                bool particle;
++                float particleRel[3];
++                // Rush 2 recomp: the particle's view, its viewport's top left (CarLightGroup::viewX, viewY).
++                float particleViewX;
++                float particleViewY;
              } triangles;
  
              struct {
@@ -4632,7 +4962,7 @@ index 95618bc..984759e 100644
          std::vector<uint8_t> bytesTMEM;
          bool decodeTMEM = false;
 diff --git a/src/render/rt64_texture_cache.cpp b/src/render/rt64_texture_cache.cpp
-index 0848f3e..bb0b3f5 100644
+index 0848f3e..f0df2b3 100644
 --- a/src/render/rt64_texture_cache.cpp
 +++ b/src/render/rt64_texture_cache.cpp
 @@ -4,6 +4,11 @@
@@ -4788,9 +5118,8 @@ index 0848f3e..bb0b3f5 100644
 +            accessList.push_front({ textureIndex, creationFrame });
 +            listIterators[textureIndex] = accessList.begin();
 +        }
-     }
- 
--    void TextureMap::replace(uint64_t hash, Texture *texture, bool shiftedByHalf, bool referenceCounted) {
++    }
++
 +    void TextureMap::unpinAll() {
 +        // Rush 2 recomp: prewarmed textures never used go into the access list as last used when they were made, so
 +        // the next eviction ages them out like any other.
@@ -4800,8 +5129,9 @@ index 0848f3e..bb0b3f5 100644
 +                listIterators[i] = std::prev(accessList.end());
 +            }
 +        }
-+    }
-+
+     }
+ 
+-    void TextureMap::replace(uint64_t hash, Texture *texture, bool shiftedByHalf, bool referenceCounted) {
 +    void TextureMap::replace(uint64_t hash, Texture *texture, ReplacementShift shift, bool referenceCounted, const ReplacementRegion &region) {
 +        const bool shiftedByHalf = (shift == ReplacementShift::Half) || (shift == ReplacementShift::Center);
 +        const bool centered = (shift == ReplacementShift::Center);
@@ -5185,11 +5515,11 @@ index 0848f3e..bb0b3f5 100644
 +                        mipDescriptorSetCount += mipLevels - 1;
 +                    }
 +                }
-+
+ 
 +                while (mipDescriptorSets.size() < mipDescriptorSetCount) {
 +                    mipDescriptorSets.emplace_back(std::make_unique<TextureDecodeDescriptorSet>(directWorker->device));
 +                }
- 
++
 +                auto createResources = [&](size_t i) {
 +                    const TextureUpload &upload = queueCopy[i];
 +                    Texture *newTexture = textureMapAdditions[i].texture;
@@ -5670,7 +6000,7 @@ index 0848f3e..bb0b3f5 100644
      }
  
      void TextureCache::reloadReplacements(bool clearQueue, uint64_t exclusiveDbHash) {
-@@ -1459,71 +2115,81 @@ namespace RT64 {
+@@ -1459,71 +2115,86 @@ namespace RT64 {
          return loadReplacementDirectories({ replacementDirectory });
      }
      
@@ -5697,7 +6027,8 @@ index 0848f3e..bb0b3f5 100644
 +        return applyReplacementDirectories(prepareReplacementDirectories(replacementDirectories), true);
 +    }
 +
-+    std::unique_ptr<PreparedReplacements> TextureCache::prepareReplacementDirectories(const std::vector<ReplacementDirectory> &replacementDirectories) {
++    std::unique_ptr<PreparedReplacements> TextureCache::prepareReplacementDirectories(const std::vector<ReplacementDirectory> &replacementDirectories, const std::atomic<bool> *cancel) {
++        auto cancelled = [cancel]() { return (cancel != nullptr) && cancel->load(); };
 +        std::unique_ptr<PreparedReplacements> p = std::make_unique<PreparedReplacements>();
 +        p->replacementDirectories = replacementDirectories;
          for (const ReplacementDirectory &replacementDirectory : replacementDirectories) {
@@ -5762,6 +6093,10 @@ index 0848f3e..bb0b3f5 100644
 -            for (int32_t i = int32_t(fileSystems.size()) - 1; i >= 0; i--) {
 -                if (fileSystems[i]->load(ReplacementDatabaseFilename, databaseBytes)) {
 +            for (int32_t i = int32_t(p->fileSystems.size()) - 1; i >= 0; i--) {
++                if (cancelled()) {
++                    break;
++                }
++
 +                if (p->fileSystems[i]->load(ReplacementDatabaseFilename, databaseBytes)) {
                      try {
                          ReplacementDatabase db;
@@ -5781,7 +6116,7 @@ index 0848f3e..bb0b3f5 100644
                              }
                          }
                      }
-@@ -1532,37 +2198,144 @@ namespace RT64 {
+@@ -1532,37 +2203,157 @@ namespace RT64 {
                      }
                  }
  
@@ -5793,9 +6128,7 @@ index 0848f3e..bb0b3f5 100644
                          fprintf(stderr, "Failed to load low mip cache.\n");
                      }
                  }
--            }
- 
--            loaderCommandList->end();
++
 +                // Rush 2 recomp: the pack's preload textures, read and uploaded here (PreloadedTexture). The files are
 +                // read in turn, PNGs decoded (with their generated mipmaps) on every core, and the uploads recorded on
 +                // this command list: a font pack's 84 sheets (9 megapixels) took 0.9 s decoded one by one.
@@ -5807,28 +6140,26 @@ index 0848f3e..bb0b3f5 100644
 +
 +                std::vector<PreloadFile> preloadFiles;
 +                for (const std::string &relativePath : p->fileSystemStreamSets[i]) {
++                    if (cancelled()) {
++                        break;
++                    }
++
 +                    PreloadFile file;
 +                    file.relativePath = relativePath;
 +                    if (p->fileSystems[i]->load(relativePath, file.bytes) && (file.bytes.size() >= 4)) {
 +                        preloadFiles.emplace_back(std::move(file));
 +                    }
 +                }
- 
--            if (!textureMap.replacementMap.lowMipCacheTextures.empty()) {
--                copyWorker->commandQueue->executeCommandLists(loaderCommandList.get(), loaderCommandFence.get());
--                copyWorker->commandQueue->waitForCommandFence(loaderCommandFence.get());
++
 +                const uint32_t PNG_MAGIC = 0x474E5089;
 +                std::atomic<size_t> nextFile = 0;
 +                auto decodeFiles = [&]() {
-+                    for (size_t f; (f = nextFile++) < preloadFiles.size();) {
++                    for (size_t f; !cancelled() && ((f = nextFile++) < preloadFiles.size());) {
 +                        PreloadFile &file = preloadFiles[f];
 +                        if (*reinterpret_cast<const uint32_t *>(file.bytes.data()) != PNG_MAGIC) {
 +                            continue;
 +                        }
- 
--                // Memory used by low mip cache is considered as permanently in used.
--                textureMap.replacementMap.usedTexturePoolSize += totalMemory;
--                textureMap.replacementMap.cachedTexturePoolSize += totalMemory;
++
 +                        int width, height;
 +                        stbi_uc *data = stbi_load_from_memory(file.bytes.data(), int(file.bytes.size()), &width, &height, nullptr, 4);
 +                        if (data == nullptr) {
@@ -5854,6 +6185,10 @@ index 0848f3e..bb0b3f5 100644
 +                }
 +
 +                for (PreloadFile &file : preloadFiles) {
++                    if (cancelled()) {
++                        break;
++                    }
++
 +                    if (file.bytes.size() < 4) {
 +                        continue;
 +                    }
@@ -5867,27 +6202,29 @@ index 0848f3e..bb0b3f5 100644
 +                }
              }
  
--            // Build a vector from the known hash versions.
--            textureMap.replacementMap.resolvedHashVersions.clear();
--            textureMap.replacementMap.resolvedHashVersions.insert(textureMap.replacementMap.resolvedHashVersions.end(), knownHashVersions.begin(), knownHashVersions.end());
+-            loaderCommandList->end();
 +            commandList->end();
-+
+ 
+-            if (!textureMap.replacementMap.lowMipCacheTextures.empty()) {
+-                copyWorker->commandQueue->executeCommandLists(loaderCommandList.get(), loaderCommandFence.get());
+-                copyWorker->commandQueue->waitForCommandFence(loaderCommandFence.get());
++            // Rush 2 recomp: a cancelled load submits nothing; the recorded uploads go with the command list.
++            if (cancelled()) {
++                return p;
++            }
+ 
+-                // Memory used by low mip cache is considered as permanently in used.
+-                textureMap.replacementMap.usedTexturePoolSize += totalMemory;
+-                textureMap.replacementMap.cachedTexturePoolSize += totalMemory;
 +            if (!p->lowMipCacheTextures.empty() || !p->preloadedTextures.empty()) {
 +                copyWorker->commandQueue->executeCommandLists(commandList.get(), commandFence.get());
 +                copyWorker->commandQueue->waitForCommandFence(commandFence.get());
-+            }
-+
+             }
+ 
+-            // Build a vector from the known hash versions.
+-            textureMap.replacementMap.resolvedHashVersions.clear();
+-            textureMap.replacementMap.resolvedHashVersions.insert(textureMap.replacementMap.resolvedHashVersions.end(), knownHashVersions.begin(), knownHashVersions.end());
 +            p->resolvedHashVersions.insert(p->resolvedHashVersions.end(), knownHashVersions.begin(), knownHashVersions.end());
-+        }
-+
-+        p->valid = true;
-+        return p;
-+    }
-+
-+    bool TextureCache::applyReplacementDirectories(std::unique_ptr<PreparedReplacements> p, bool waitForPreloads) {
-+        clearReplacementDirectories();
-+        if ((p == nullptr) || !p->valid) {
-+            return false;
          }
  
 -        // Store the file systems in the replacement map.
@@ -5897,6 +6234,16 @@ index 0848f3e..bb0b3f5 100644
 -        textureMap.replacementMap.fileSystemHashVersions = std::move(fileSystemHashVersions);
 -        textureMap.replacementMap.fileSystemStreamSets = std::move(fileSystemStreamSets);
 -        textureMap.replacementMap.fileSystemStreamResolvedPaths.resize(fileSystemCount);
++        p->valid = true;
++        return p;
++    }
++
++    bool TextureCache::applyReplacementDirectories(std::unique_ptr<PreparedReplacements> p, bool waitForPreloads) {
++        clearReplacementDirectories();
++        if ((p == nullptr) || !p->valid) {
++            return false;
++        }
++
 +        uint32_t fileSystemCount = 0;
 +        {
 +            std::unique_lock lock(textureMapMutex);
@@ -5946,7 +6293,7 @@ index 0848f3e..bb0b3f5 100644
  
          // Queue all textures that must be preloaded to the stream queues.
          bool texturesPreloaded = false;
-@@ -1570,6 +2343,10 @@ namespace RT64 {
+@@ -1570,6 +2361,10 @@ namespace RT64 {
              std::unique_lock queueLock(streamDescStackMutex);
              for (uint32_t i = 0; i < fileSystemCount; i++) {
                  for (const std::string &relativePath : textureMap.replacementMap.fileSystemStreamSets[i]) {
@@ -5957,7 +6304,7 @@ index 0848f3e..bb0b3f5 100644
                      streamDescStack.push(StreamDescription(i, relativePath, true));
                      texturesPreloaded = true;
                  }
-@@ -1579,8 +2356,11 @@ namespace RT64 {
+@@ -1579,8 +2374,11 @@ namespace RT64 {
          if (texturesPreloaded) {
              streamDescStackChanged.notify_all();
  
@@ -5972,7 +6319,7 @@ index 0848f3e..bb0b3f5 100644
  
          reloadReplacements(true);
 diff --git a/src/render/rt64_texture_cache.h b/src/render/rt64_texture_cache.h
-index 9131697..68b14a9 100644
+index 9131697..c5359af 100644
 --- a/src/render/rt64_texture_cache.h
 +++ b/src/render/rt64_texture_cache.h
 @@ -5,6 +5,7 @@
@@ -6115,7 +6462,7 @@ index 9131697..68b14a9 100644
  
          TextureCache(RenderWorker *directWorker, RenderWorker *copyWorker, uint32_t threadCount, const ShaderLibrary *shaderLibrary);
          ~TextureCache();
-@@ -236,14 +299,30 @@ namespace RT64 {
+@@ -236,14 +299,32 @@ namespace RT64 {
          void queueGPUUploadTMEM(uint64_t hash, uint64_t creationFrame, const uint8_t *bytes, int bytesCount, int width, int height, uint32_t tlut, const LoadTile &loadTile, bool decodeTMEM);
          void waitForGPUUploads();
          void addResolvedPaths(uint64_t hash, uint32_t width, uint32_t height, uint32_t tlut, const LoadTile &loadTile, const std::vector<uint8_t> &bytesTMEM, bool decodeTMEM, std::vector<ReplacementResolvedPath> &resolvedPaths, uint64_t exclusiveDbHash = 0);
@@ -6142,7 +6489,9 @@ index 9131697..68b14a9 100644
 +        // Rush 2 recomp: loadReplacementDirectories in two steps, so the slow one (opening the packs, parsing their
 +        // databases, uploading their low mip caches) runs on a thread of its own while the game keeps drawing with the
 +        // packs it has. prepare is safe on any thread; apply must be called where loadReplacementDirectories would be.
-+        std::unique_ptr<PreparedReplacements> prepareReplacementDirectories(const std::vector<ReplacementDirectory> &replacementDirectories);
++        // Rush 2 recomp: cancel (optional) set stops the preparation early with an invalid result, so shutdown doesn't
++        // wait out a whole pack load before tearing the device down.
++        std::unique_ptr<PreparedReplacements> prepareReplacementDirectories(const std::vector<ReplacementDirectory> &replacementDirectories, const std::atomic<bool> *cancel = nullptr);
 +        bool applyReplacementDirectories(std::unique_ptr<PreparedReplacements> prepared, bool waitForPreloads);
          bool saveReplacementDatabase();
          void setReplacementDefaultShift(ReplacementShift shift);
@@ -6426,20 +6775,22 @@ index 0000000..1e2be1e
 +}
 diff --git a/src/shaders/CarLightCompositePS.hlsl b/src/shaders/CarLightCompositePS.hlsl
 new file mode 100644
-index 0000000..7203492
+index 0000000..da3000b
 --- /dev/null
 +++ b/src/shaders/CarLightCompositePS.hlsl
-@@ -0,0 +1,135 @@
+@@ -0,0 +1,167 @@
 +//
 +// RT64
 +//
 +
 +// Rush 2 recomp: car lights' composite (FramebufferRenderer::submitCarLights). After a view's lamps have added their
 +// light (CarLightPS.hlsl, half resolution) and glow (CarGlowPS.hlsl), each pixel becomes scene + albedo x light + glow.
-+// The light is upsampled: of the (up to four) half resolution pixels round this one, each stands for the full
-+// resolution pixel at twice its position, and counts by how near that pixel's depth is to this one's, so light doesn't
-+// bleed across a car's outline onto what's behind it or the other way. The albedo is estimated: the scene's color over
-+// the light level the track draws its surfaces at, never under a small floor so a black surface still lifts a little.
++// The light is upsampled: each half resolution pixel stands for the full resolution pixel at twice its position.
++// Bilinearly from the (up to four) round this one on open surfaces; at an edge from all within 3 full resolution
++// pixels, each counting by how near that pixel's depth is to this sample's, so light doesn't bleed across a car's
++// outline onto what's behind it or the other way, and the light's edge follows the scene's at full resolution. The albedo is estimated: the scene's color over
++// the light level the track draws its surfaces at, never under a small floor so a black surface still lifts a little,
++// nor over 1. Particles (gEXSetParticleLight) are drawn after this pass and lit in RasterPS.hlsl instead.
 +// Then a shoulder over the brightest channel scales all three alike, so a red light on a gray road rolls off toward a
 +// brighter red instead of clipping to pink. Run per sample with multisampling, from a copy of the scene made just
 +// before; pixels no lamp reached are left as they are.
@@ -6509,38 +6860,66 @@ index 0000000..7203492
 +        }
 +    }
 +
-+    if (max(peak, max(glow.r, max(glow.g, glow.b))) < (1.0f / 1024.0f)) {
++    // This sample's w, and how far (relative to the distance) it is from the surface its first light pixel was lit for.
++    // An outline (a car against the road or a wall behind it) is a jump of well over EdgeGap; a surface seen at a grazing
++    // angle changes far less from one pixel to the next. An edge sample may lie on a lit surface while that light
++    // pixel, on the other one, is dark, so a dark one is only dropped off an edge.
++    const float EdgeGap = 0.1f;
++    const float w = wOf(depthAt(pixel, sampleIndex));
++    const float baseGap = abs(wOf(depthAt(min(base, lightMax) * 2, 0)) - w) / max(w, 1.0f);
++    if ((max(peak, max(glow.r, max(glow.g, glow.b))) < (1.0f / 1024.0f)) && (baseGap <= EdgeGap)) {
 +        discard;
 +    }
 +
-+    // Where they agree (within a tenth, as on open road) their average; otherwise each weighed by how near its own
-+    // pixel's depth is to this one's (relative to the distance), the nearest kept if none is near (an edge one pixel
-+    // wide).
++    // An edge: this sample off its first light pixel's surface, or, where the light pixels round it disagree (by more
++    // than a tenth), one of the others off it. Elsewhere (all one surface, however the light varies over it, which
++    // bilinear filtering follows) their bilinear average.
++    bool edge = (baseGap > EdgeGap);
++    if (!edge && ((peak - low) > 0.1f * peak)) {
++        for (int k = 1; k < 4; k++) {
++            const int2 step = int2(k & 1, k >> 1);
++            if (!any(step > odd)) {
++                edge = edge || ((abs(wOf(depthAt(min(base + step, lightMax) * 2, 0)) - w) / max(w, 1.0f)) > EdgeGap);
++            }
++        }
++    }
++
++    // At an edge, every light pixel within 3 full resolution pixels (3 x 3 to 4 x 4 of them), each weighed by its
++    // nearness on screen (a tent 4 pixels wide) and by how near its own pixel's depth is to this sample's (relative to
++    // the distance), the nearest in depth kept if none is near. The wider search gives each sample of an edge pixel
++    // (multisampling) and each even pixel, which has only its own light pixel in the bilinear set, a light pixel on its
++    // own surface, so the light's edge follows the scene's at full resolution and its antialiasing instead of the
++    // light's half resolution grid.
 +    float3 light = average / used;
-+    if ((peak - low) > 0.1f * peak) {
-+        const float w = wOf(depthAt(pixel, sampleIndex));
++    if (edge) {
++        const int2 first = int2(ceil((float2(pixel) - 3.0f) * 0.5f));
++        const int2 last = int2(floor((float2(pixel) + 3.0f) * 0.5f));
 +        float3 weighed = float3(0.0f, 0.0f, 0.0f);
 +        float weights = 0.0f;
 +        float3 nearest = float3(0.0f, 0.0f, 0.0f);
 +        float nearestGap = 1e30f;
-+        for (int k = 0; k < 4; k++) {
-+            const int2 step = int2(k & 1, k >> 1);
-+            if (any(step > odd)) {
-+                continue;
-+            }
++        for (int y = first.y; y <= last.y; y++) {
++            for (int x = first.x; x <= last.x; x++) {
++                const int2 at = clamp(int2(x, y), int2(0, 0), lightMax);
++                const float2 offset = abs(float2(int2(x, y) * 2 - pixel));
++                const float spatial = saturate(1.0f - offset.x * 0.25f) * saturate(1.0f - offset.y * 0.25f);
++                if (spatial <= 0.0f) {
++                    continue;
++                }
 +
-+            const int2 at = min(base + step, lightMax);
-+            const float gap = abs(wOf(depthAt(at * 2, 0)) - w) / max(w, 1.0f);
-+            const float weight = exp(-gap * 40.0f);
-+            weighed += lights[k] * weight;
-+            weights += weight;
-+            if (gap < nearestGap) {
-+                nearestGap = gap;
-+                nearest = lights[k];
++                const float3 sampleLight = gLight.Load(int3(at, 0)).rgb;
++                const float gap = abs(wOf(depthAt(at * 2, 0)) - w) / max(w, 1.0f);
++                const float weight = spatial * exp(-gap * 40.0f);
++                weighed += sampleLight * weight;
++                weights += weight;
++                if (gap < nearestGap) {
++                    nearestGap = gap;
++                    nearest = sampleLight;
++                }
 +            }
 +        }
 +
-+        light = (weights > 0.05f) ? weighed / weights : nearest;
++        light = (weights > 0.02f) ? weighed / weights : nearest;
 +    }
 +
 +#ifdef MULTISAMPLING
@@ -6552,7 +6931,9 @@ index 0000000..7203492
 +    // surface close in front of a lamp is brightly lit without going flat white.
 +    const float lightPeak = max(light.r, max(light.g, light.b));
 +    const float3 lit = light / (1.0f + lightPeak / 1.5f);
-+    const float3 albedo = max(scene.rgb * gConstants.invLevel, gConstants.albedoFloor);
++    // At most 1: a surface brighter than the track's level (lane paint, a sign) reflects at most all the light, so it
++    // isn't pushed past white.
++    const float3 albedo = clamp(scene.rgb * gConstants.invLevel, gConstants.albedoFloor, 1.0f);
 +    float3 color = scene.rgb + albedo * lit + glow;
 +    // The shoulder starts no lower than the scene's own brightest channel, so a surface already bright isn't dimmed.
 +    const float colorPeak = max(color.r, max(color.g, color.b));
@@ -6567,10 +6948,10 @@ index 0000000..7203492
 +}
 diff --git a/src/shaders/CarLightPS.hlsl b/src/shaders/CarLightPS.hlsl
 new file mode 100644
-index 0000000..9928db5
+index 0000000..63bc9f5
 --- /dev/null
 +++ b/src/shaders/CarLightPS.hlsl
-@@ -0,0 +1,193 @@
+@@ -0,0 +1,230 @@
 +//
 +// RT64
 +//
@@ -6643,8 +7024,46 @@ index 0000000..9928db5
 +    return !((depth < 0.99999f) && (w > 0.0f));
 +}
 +
-+// One lamp at lampPos (from the camera) on the surface point p with normal n: its light before any shadow.
-+float3 lampLight(float3 lampPos, float3 p, float3 n, float3 axis, float3 side, bool headlamp) {
++// The point the depth buffer holds at a full resolution pixel, from the camera, and its w (huge for the sky, so a sky
++// neighbor is never taken as the surface's own).
++float3 pointAt(int2 pixel, out float w) {
++    const float depth = depthAt(pixel);
++    w = wOf(depth);
++    const float2 at = float2(pixel) + 0.5f;
++    const float3 p = (at.x * gConstants.dirX.xyz + at.y * gConstants.dirY.xyz + gConstants.dirW.xyz) * max(w, 0.0f);
++    if (isSky(depth, w)) {
++        w = 1e30f;
++    }
++
++    return p;
++}
++
++// The surface's normal at a full resolution pixel, from its own neighbors one pixel away at full resolution: across
++// and down, each from the side whose depth is nearer this pixel's, so a pixel next to an edge takes its normal from
++// its own surface, not from the step across the edge to what is behind or in front. (Screen space derivatives here
++// would span a 2 x 2 quad of half resolution pixels, 4 full resolution pixels, and one quad straddling an edge would
++// give its whole block a normal from both surfaces: blocky light round every outline and crease.) Turned toward the
++// camera.
++float3 normalAt(int2 pixel, float3 p, float w, int2 maxPixel) {
++    float wl, wr, wu, wd;
++    const float3 pl = pointAt(max(pixel - int2(1, 0), int2(0, 0)), wl);
++    const float3 pr = pointAt(min(pixel + int2(1, 0), maxPixel), wr);
++    const float3 pu = pointAt(max(pixel - int2(0, 1), int2(0, 0)), wu);
++    const float3 pd = pointAt(min(pixel + int2(0, 1), maxPixel), wd);
++    const bool right = (pixel.x == 0) || ((pixel.x < maxPixel.x) && (abs(wr - w) < abs(wl - w)));
++    const bool down = (pixel.y == 0) || ((pixel.y < maxPixel.y) && (abs(wd - w) < abs(wu - w)));
++    const float3 across = right ? (pr - p) : (p - pl);
++    const float3 downward = down ? (pd - p) : (p - pu);
++    float3 n = cross(across, downward);
++    const float nLength = length(n);
++    n = (nLength > 1e-12f) ? n / nLength : float3(0.0f, 1.0f, 0.0f);
++    return (dot(n, p) > 0.0f) ? -n : n;
++}
++
++// One lamp at lampPos (from the camera) on the surface point p: its light before any shadow and before the Lambert
++// term, which the caller applies with the direction toward the lamp (l), once it knows the light is worth a normal.
++float3 lampLight(float3 lampPos, float3 p, float3 axis, float3 side, bool headlamp, out float3 l) {
++    l = float3(0.0f, 0.0f, 1.0f);
 +    const float3 toLight = lampPos - p;
 +    const float distance = length(toLight);
 +    const float range = gConstants.light.w;
@@ -6652,9 +7071,8 @@ index 0000000..9928db5
 +        return float3(0.0f, 0.0f, 0.0f);
 +    }
 +
-+    const float3 l = toLight / distance;
++    l = toLight / distance;
 +    const float3 d = -l;
-+    const float lambert = saturate(dot(n, l));
 +    float shape = 0.0f;
 +    const float along = dot(d, axis);
 +    if (headlamp) {
@@ -6682,7 +7100,7 @@ index 0000000..9928db5
 +    const float ratio2 = ratio * ratio;
 +    const float window = saturate(1.0f - ratio2 * ratio2);
 +    const float feet = distance / UnitsPerFoot;
-+    return gConstants.color.rgb * (shape * lambert * window * window / (feet * feet + 1.0f));
++    return gConstants.color.rgb * (shape * window * window / (feet * feet + 1.0f));
 +}
 +
 +float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
@@ -6694,16 +7112,6 @@ index 0000000..9928db5
 +    const float w = wOf(depth);
 +    const bool sky = isSky(depth, w);
 +    const float3 p = (fullPos.x * gConstants.dirX.xyz + fullPos.y * gConstants.dirY.xyz + gConstants.dirW.xyz) * max(w, 0.0f);
-+
-+    // The surface's normal from its neighbors (taken before any branch, so the derivatives are whole), turned toward
-+    // the camera.
-+    float3 n = cross(ddx(p), ddy(p));
-+    const float nLength = length(n);
-+    n = (nLength > 1e-12f) ? n / nLength : float3(0.0f, 1.0f, 0.0f);
-+    if (dot(n, p) > 0.0f) {
-+        n = -n;
-+    }
-+
 +    const bool headlamp = gConstants.color.w > 0.5f;
 +    const float3 axis = gConstants.direction.xyz;
 +    const float3 side = normalize(cross(gConstants.up.xyz, axis));
@@ -6714,13 +7122,23 @@ index 0000000..9928db5
 +    }
 +
 +    // The lamp, or a pair of lamps either side of light.xyz (dirW.w: half the gap along the car's side, 0 for one).
++    // Too faint to show (the composite adds albedo x light: under 0.002 is under a tenth of an 8-bit step even on white),
++    // checked before the Lambert term (at most 1) so pixels outside the beam don't read the normal's neighbors.
 +    const float halfGap = gConstants.dirW.w;
-+    float3 irradiance = lampLight(gConstants.light.xyz - side * halfGap, p, n, axis, side, headlamp);
++    float3 l0, l1 = float3(0.0f, 0.0f, 1.0f);
++    const float3 unlit0 = lampLight(gConstants.light.xyz - side * halfGap, p, axis, side, headlamp, l0);
++    float3 unlit1 = float3(0.0f, 0.0f, 0.0f);
 +    if (halfGap != 0.0f) {
-+        irradiance += lampLight(gConstants.light.xyz + side * halfGap, p, n, axis, side, headlamp);
++        unlit1 = lampLight(gConstants.light.xyz + side * halfGap, p, axis, side, headlamp, l1);
 +    }
 +
-+    // Too faint to show (the composite adds albedo x light: under 0.002 is under a tenth of an 8-bit step even on white).
++    const float3 unlit = unlit0 + unlit1;
++    if (max(unlit.r, max(unlit.g, unlit.b)) < MinLight) {
++        return float4(0.0f, 0.0f, 0.0f, 0.0f);
++    }
++
++    const float3 n = normalAt(pixel, p, w, maxPixel);
++    const float3 irradiance = unlit0 * saturate(dot(n, l0)) + unlit1 * saturate(dot(n, l1));
 +    const float peak = max(irradiance.r, max(irradiance.g, irradiance.b));
 +    if (peak < MinLight) {
 +        return float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -7017,7 +7435,7 @@ index 0000000..83595fb
 +    oCubeNormal = iCubeNormal.xyz;
 +}
 diff --git a/src/shaders/RasterPS.hlsl b/src/shaders/RasterPS.hlsl
-index e7895c3..d107485 100644
+index e7895c3..03b2dc5 100644
 --- a/src/shaders/RasterPS.hlsl
 +++ b/src/shaders/RasterPS.hlsl
 @@ -46,7 +46,7 @@ float sampleBackgroundDepth(int2 pixelPos, uint sampleCount) {
@@ -7071,7 +7489,34 @@ index e7895c3..d107485 100644
      }
      
      // Color combiner.
-@@ -200,8 +217,39 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
+@@ -182,7 +199,25 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
+     ccInputs.K4 = (instanceRDPParams[instanceIndex].convertK[4] / 255.0f);
+     ccInputs.K5 = (instanceRDPParams[instanceIndex].convertK[5] / 255.0f);
+     colorCombiner.run(ccInputs, combinerColor, alphaCompareValue);
+-    
++
++    // Rush 2 recomp: a particle the car lights shine on (gEXSetParticleLight, FramebufferRenderer::submitRasterScene):
++    // the light it scatters times its albedo, as CarLightCompositePS.hlsl lights a surface (the albedo its color over
++    // the track's light level, at most 1), then the same shoulder over the brightest channel, so a tan puff in a beam
++    // brightens toward a lighter tan instead of clipping to white.
++    if (gConstants.particleLight.w > 0.0f) {
++        const float3 particleAlbedo = min(combinerColor.rgb * gConstants.particleLight.w, 1.0f);
++        float3 particleColor = combinerColor.rgb + particleAlbedo * gConstants.particleLight.rgb;
++        const float particlePeak = max(particleColor.r, max(particleColor.g, particleColor.b));
++        const float particleKnee = max(0.8f, max(combinerColor.r, max(combinerColor.g, combinerColor.b)));
++        if ((particlePeak > particleKnee) && (particleKnee < 1.0f)) {
++            const float room = 1.0f - particleKnee;
++            const float rolled = particleKnee + room * (1.0f - exp(-(particlePeak - particleKnee) / room));
++            particleColor *= rolled / particlePeak;
++        }
++
++        combinerColor.rgb = particleColor;
++    }
++
+ #if 0
+     // Alpha dither.
+     // TODO: To avoid increasing the alpha values here, the only viable choice would be to drop the precision down to 5-bit.
+@@ -200,8 +235,39 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
      }
  #endif
      
@@ -7113,7 +7558,7 @@ index e7895c3..d107485 100644
          if (alphaCompareValue < nextRand(randomSeed)) {
              return false;
          }
-@@ -292,6 +340,12 @@ void PSMain(
+@@ -292,6 +358,12 @@ void PSMain(
  #endif
      , [[vk::location(0)]] [[vk::index(0)]] out float4 pixelColor : SV_TARGET0
      , [[vk::location(0)]] [[vk::index(1)]] out float4 pixelAlpha : SV_TARGET1
@@ -7126,7 +7571,7 @@ index e7895c3..d107485 100644
  )
  {
  #if !defined(DYNAMIC_RENDER_PARAMS)
-@@ -303,11 +357,15 @@ void PSMain(
+@@ -303,11 +375,15 @@ void PSMain(
      float4 resultColor;
      float4 resultAlpha;
      float resultDepth;
@@ -7698,6 +8143,21 @@ index 4548f15..9add7cd 100644
  #endif
      struct GPUTile {
          float2 ulScale;
+diff --git a/src/shared/rt64_raster_params.h b/src/shared/rt64_raster_params.h
+index 0a5c332..81e3912 100644
+--- a/src/shared/rt64_raster_params.h
++++ b/src/shared/rt64_raster_params.h
+@@ -14,6 +14,10 @@ namespace interop {
+         uint3 padding;
+         float2 screenScale;
+         float2 screenOffset;
++        // Rush 2 recomp: a particle's car light (gEXSetParticleLight): rgb the light it scatters (already eased, as
++        // CarLightCompositePS.hlsl eases a surface's), w the inverse of the light level the track draws at; w 0 for
++        // every other draw.
++        float4 particleLight;
+     };
+ #ifdef HLSL_CPU
+ };
 diff --git a/src/shared/rt64_sky_fog.h b/src/shared/rt64_sky_fog.h
 new file mode 100644
 index 0000000..0eba2e0

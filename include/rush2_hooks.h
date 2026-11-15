@@ -410,6 +410,7 @@ void rush2_records_screen_render_exit(uint8_t* rdram, recomp_context* ctx);
 void rush2_records_screen_times(uint8_t* rdram, recomp_context* ctx);
 void rush2_records_screen_stats(uint8_t* rdram, recomp_context* ctx);
 int rush2_records_screen_icon(uint8_t* rdram, recomp_context* ctx);
+void rush2_records_screen_widgets(uint8_t* rdram, recomp_context* ctx);
 
 // The unlock system's shop (src/unlocks_shop.cpp).
 int rush2_unlocks_track_select(uint8_t* rdram, recomp_context* ctx);
@@ -538,6 +539,7 @@ void rush2_wings_car_rows(uint8_t* rdram, recomp_context* ctx);
 void rush2_wings_car_step(uint8_t* rdram, recomp_context* ctx);
 void rush2_shoulder_car_buttons(uint8_t* rdram, recomp_context* ctx);
 void rush2_shoulder_car_row(uint8_t* rdram, recomp_context* ctx);
+void rush2_shoulder_car_unlock(uint8_t* rdram, recomp_context* ctx);
 void rush2_shoulder_track_buttons(uint8_t* rdram, recomp_context* ctx);
 void rush2_shoulder_track_restore(uint8_t* rdram, recomp_context* ctx);
 void rush2_wings_car_label_t7(uint8_t* rdram, recomp_context* ctx);

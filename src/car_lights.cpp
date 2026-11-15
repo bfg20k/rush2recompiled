@@ -31,6 +31,11 @@
 // The display list is rebuilt (into the next of three buffers, so one the renderer may still read is never rewritten)
 // when a lamp comes on or goes off or the brakes change.
 //
+// SF Rush Sunset's traffic buses (src/rush1/track1_buses.cpp) get headlamps too, with the same option and night rule:
+// BUSO1's two lamps under its orange band (bus_lamps, read off the model's front), drawn the same way (markers only,
+// no lens glow: RT64's glow round each lamp shows the lens) from slots 324-331 (bus i at bus_slot + i, its trampoline
+// at 0x80E1F380 + 32 i), placed with the bus's pose.
+//
 // Test aids: RUSH2_CAR_LIGHTS_LOG=1 prints what is found and when lamps change; RUSH2_CAR_LIGHTS_TEST=1 lights every
 // car as if it braked; RUSH2_CAR_LIGHTS_DUMP=<folder> writes each car's body and lamps as JSON for tools/car_lamps.py.
 
@@ -68,6 +73,8 @@
 #include "ghost.h"
 #include "rush2.h"
 #include "rush2049_rom.h"
+#include "scene_nodes.h"
+#include "track1.h"
 #include "track2049.h"
 #include "track_cache.h"
 #include "wings.h"
@@ -83,6 +90,10 @@ namespace {
 
     // The trampolines (0x80E1F200-0x80E1F300, src/controls_menu.cpp): car c's at + 32 c.
     constexpr uint32_t trampolines = 0x80E1F200;
+    // The buses' (0x80E1F380-0x80E1F480, src/controls_menu.cpp): bus b's at + 32 b, drawn from slot bus_slot + b.
+    constexpr int max_buses = 8;
+    constexpr uint32_t bus_trampolines = 0x80E1F380;
+    constexpr int bus_slot = 324;
 
     // The light (lib/rt64 CarLightPS.hlsl has the shapes and intensities): how far the headlamps and tail lamps reach
     // (feet), and the light level the converted night tracks draw their surfaces at, which the surfaces' albedo is
@@ -1317,7 +1328,11 @@ namespace {
     int next_car = 0;
     bool models_added = false;
 
+    // Car c's block, then the buses' (index max_cars + b).
     uint32_t block_of(int car) { return block_base + uint32_t(car) * car_block; }
+    uint32_t trampoline_of(int car) {
+        return car < max_cars ? trampolines + uint32_t(car) * 32 : bus_trampolines + uint32_t(car - max_cars) * 32;
+    }
 
     void write_cmd(uint8_t* rdram, uint32_t& at, uint32_t w0, uint32_t w1) {
         MEM_W(0, (int32_t)at) = (int32_t)w0;
@@ -1460,7 +1475,7 @@ namespace {
         write_cmd(rdram, at, 0xDF000000, 0);                       // G_ENDDL
 
         // The trampoline: into the list above 16 MB and back.
-        uint32_t t = trampolines + uint32_t(car) * 32;
+        uint32_t t = trampoline_of(car);
         GfxCommand ext;
         gEXSetRDRAMExtended(&ext, 1);
         write_cmd(rdram, t, ext.values.word0, ext.values.word1);
@@ -1480,8 +1495,20 @@ namespace {
         if (log_on) std::printf("[car_lights] car %d off\n", i), std::fflush(stdout);
     }
 
+    // The buses' lamps: BUSO1's headlamps (ft in its axes, +z its front; the lit rectangles under the orange band, x
+    // +-85, y 46, z 320 of the model's 1/16 ft units), and each bus's drawing state.
+    const std::vector<Lamp> bus_lamps = { { true, { 5.3f, 2.9f, 20.0f }, 0.6f, 0 }, { true, { -5.3f, 2.9f, 20.0f }, 0.6f, 1 } };
+    CarState bus_state[max_buses];
+
+    void hide_bus(int b) {
+        if (!bus_state[b].placed) return;
+        rush2::battle_render::hide(bus_slot + b);
+        bus_state[b].placed = false;
+    }
+
     void hide_all() {
         for (int i = 0; i < max_cars; i++) hide(i);
+        for (int b = 0; b < max_buses; b++) hide_bus(b);
     }
 
     // A car's lamps being looked for on a worker (the walk takes a few ms, too long for the game thread), and what
@@ -1582,6 +1609,28 @@ namespace {
         }).detach();
     }
 
+    // The race cars' wheel particles (particle_emitter_spawn_8008270C): each car's ring of 48 scene nodes (indices,
+    // s32) at +0x64 of its car record (rush2::car_types::car_states, 0x134 each; +0x124 the next one used), each
+    // thrown as a puff of dust, smoke or spray and moved by particle_spawn_explosion_8005AEA4. Marked while the lamps
+    // are on (particle_node).
+    constexpr uint32_t particle_ring = 0x64;
+    constexpr int particle_ring_size = 48;
+    std::vector<bool> particle_nodes(rush2::scene_nodes::capacity, false);
+    bool particles_lit = false;
+
+    void mark_particles(uint8_t* rdram, bool lit) {
+        std::fill(particle_nodes.begin(), particle_nodes.end(), false);
+        particles_lit = lit;
+        if (!lit) return;
+        for (int c = 0; c < max_cars; c++) {
+            const uint32_t ring = rush2::car_types::car_states + uint32_t(c) * 0x134 + particle_ring;
+            for (int k = 0; k < particle_ring_size; k++) {
+                const int32_t index = MEM_W(k * 4, (int32_t)ring);
+                if (index > 0 && uint32_t(index) < rush2::scene_nodes::capacity) particle_nodes[index] = true;
+            }
+        }
+    }
+
     int panel_level(uint8_t* rdram, int car, int panel) {
         uint32_t bits = (uint32_t)MEM_W(0, (int32_t)(car_states + uint32_t(car) * car_state_size + state_damage));
         uint32_t mask = (uint32_t)MEM_W(0, (int32_t)(panel_masks + panel * 4));
@@ -1595,6 +1644,15 @@ void rush2::car_lights::set_enabled(bool on) {
         load_cache_async();
         load_table_async();
     }
+}
+
+bool rush2::car_lights::particle_node(uint32_t index) {
+    // RUSH2_TEST_PARTICLE_LIGHT=0 (test aid): no particle marks, so the composite lights them as before, to compare.
+    static const bool marks_off = [] {
+        const char* v = std::getenv("RUSH2_TEST_PARTICLE_LIGHT");
+        return v != nullptr && v[0] == '0';
+    }();
+    return !marks_off && particles_lit && index < particle_nodes.size() && particle_nodes[index];
 }
 
 void rush2::car_lights::set_braking(int car, bool lit) {
@@ -1613,10 +1671,11 @@ extern "C" void rush2_car_lights_view(uint8_t* rdram, recomp_context* ctx) {
     if (!enabled || (int32_t)MEM_W(0, (int32_t)game_state) < 3 || !rush2::track2049::night_race(rdram)) {
         hide_all();
         for (CarState& cs : state) cs.found = false;
+        if (particles_lit) mark_particles(rdram, false);
         return;
     }
     if (block_base == 0) {
-        uint8_t* block = (uint8_t*)recomp::alloc(rdram, car_block * max_cars + 16);
+        uint8_t* block = (uint8_t*)recomp::alloc(rdram, car_block * (max_cars + max_buses) + 16);
         if (block == nullptr) return;
         block_base = (uint32_t(block - rdram) + 0x80000000u + 15) & ~15u;
     }
@@ -1625,6 +1684,11 @@ extern "C" void rush2_car_lights_view(uint8_t* rdram, recomp_context* ctx) {
             uint32_t t = trampolines + uint32_t(c) * 32;
             write_cmd(rdram, t, 0xDF000000, 0);
             rush2::battle_render::add_model(model_name(c).c_str(), trampolines + uint32_t(c) * 32);
+        }
+        for (int b = 0; b < max_buses; b++) {
+            uint32_t t = trampoline_of(max_cars + b);
+            write_cmd(rdram, t, 0xDF000000, 0);
+            rush2::battle_render::add_model(model_name(max_cars + b).c_str(), trampoline_of(max_cars + b));
         }
         models_added = true;
     }
@@ -1672,4 +1736,25 @@ extern "C" void rush2_car_lights_view(uint8_t* rdram, recomp_context* ctx) {
         if (log_on && !cs.placed) std::printf("[car_lights] car %d on\n", i), std::fflush(stdout);
         cs.placed = true;
     }
+
+    // Sunset's buses: both headlamps always on.
+    for (int b = 0; b < max_buses; b++) {
+        float pos[3], m[9];
+        if (!rush2::track1::bus_pose(b, pos, m)) {
+            hide_bus(b);
+            continue;
+        }
+        CarState& bs = bus_state[b];
+        if (bs.lamps.lamps.empty()) bs.lamps.lamps = bus_lamps;
+        const uint64_t lit = 3;
+        if (bs.drawn != lit) build_list(rdram, max_cars + b, bs, lit);
+        rush2::battle_render::place(bus_slot + b, model_name(max_cars + b).c_str(), m, pos, 0xFFFFFFFFu, -1, false, false, -0.15f);
+        bs.placed = true;
+    }
+
+    // The wheel particles the lamps shine on, while any lamp is lit.
+    bool any_lit = false;
+    for (const CarState& cs : state) any_lit = any_lit || cs.placed;
+    for (const CarState& bs : bus_state) any_lit = any_lit || bs.placed;
+    mark_particles(rdram, any_lit);
 }

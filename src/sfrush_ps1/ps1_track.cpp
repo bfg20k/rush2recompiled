@@ -904,6 +904,58 @@ static std::array<double, 3> night_light(const ps1::Disc& disc) {
     return out;
 }
 
+// Track tr's texture pages and CLUTs in VRAM as its loaders upload them (vram.py Vram), from the set `suffix` names
+// ("" day, "S" snow, "N" night: T<n>PAGE<suffix>.DAT, T<n>CLUT<suffix>.DAT).
+static bool load_vram(const ps1::Disc& disc, const Exe& exe, const TrackInfo& tr, const char* suffix, Vram& vram,
+                      std::string& log) {
+    Calls pages, cluts;
+    scan(exe, tr.page_loader, pages);
+    scan(exe, tr.clut_loader, cluts);
+    std::vector<std::vector<uint8_t>> page_chunks, clut_chunks;
+    const std::string t = std::to_string(tr.n);
+    const std::string sfx = suffix;
+    auto last = [](const std::vector<int>& v) { return v.empty() ? size_t(SIZE_MAX) : size_t(*std::max_element(v.begin(), v.end())); };
+    if (!disc.chunks("T" + t + "PAGE/T" + t + "PAGE" + sfx, page_chunks) || !disc.chunks("T" + t + "CLUT/T" + t + "CLUT" + sfx, clut_chunks) ||
+        last(pages.image_chunks) >= page_chunks.size() || last(cluts.clut_chunks) >= clut_chunks.size()) {
+        char line[128];
+        snprintf(line, sizeof(line), "texture pages: %zu loads for %zu chunks, CLUTs: %zu for %zu\n", pages.images.size(),
+                 page_chunks.size(), cluts.cluts.size(), clut_chunks.size());
+        log += line;
+        return false;
+    }
+    // The page loader (func_80039A88) loads the whole .DAT into one buffer, steps through it by the .SIZ's sizes and
+    // uploads each chunk with its fixed RECT whatever the chunk's size: the night set's chunk 28 is 64 x 28 texels
+    // against the RECT's 64 x 32, so its last 4 rows are read from the start of chunk 29, as here.
+    std::vector<uint8_t> page_data;
+    std::vector<size_t> page_at;
+    for (const auto& c : page_chunks) {
+        page_at.push_back(page_data.size());
+        page_data.insert(page_data.end(), c.begin(), c.end());
+    }
+    for (size_t k = 0; k < pages.images.size(); k++) {
+        auto [x, y, w, h] = pages.images[k];
+        const size_t at = page_at[size_t(pages.image_chunks[k])];
+        if (x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > 1024 || y + h > 512 || at + 0x28 + size_t(w) * h * 2 > page_data.size()) {
+            log += "a texture page's RECT is outside VRAM\n";
+            return false;
+        }
+        const uint8_t* c = &page_data[at + 0x28];
+        for (int r = 0; r < h; r++) {
+            for (int i = 0; i < w; i++) vram.v[size_t(y + r) * 1024 + size_t(x + i)] = u16(&c[2 * (size_t(r) * w + i)]);
+        }
+    }
+    // Each call's own chunk (Calls), both upload functions counted: track 2's loader puts chunks 10 and 26 up with
+    // clut_upload_dark. Taking only clut_upload_shaded's calls as the chunks in order gave every Embarcadero CLUT from
+    // the 11th on a later chunk's colors, and left the tunnel's two CLUTs empty (transparent).
+    for (size_t k = 0; k < cluts.cluts.size(); k++) {
+        auto [x, y] = cluts.cluts[k];
+        const auto& c = clut_chunks[size_t(cluts.clut_chunks[k])];
+        if (x < 0 || y < 0 || x + 16 > 1024 || y >= 512 || c.size() < 40) return false;
+        for (int i = 0; i < 16; i++) vram.v[size_t(y) * 1024 + size_t(x + i)] = u16(&c[8 + 2 * i]);
+    }
+    return true;
+}
+
 static bool build_condition(const ps1::Disc& disc, const std::filesystem::path& assets_dir, ps1::ModFiles& out,
                             std::string& log, const TrackInfo& tr, const ConditionInfo& cond,
                             const std::vector<uint8_t>* n64_lanes, const ps1::N64Scene* n64_scene) {
@@ -926,51 +978,9 @@ static bool build_condition(const ps1::Disc& disc, const std::filesystem::path& 
         return false;
     }
     // Texture pages and CLUTs in VRAM.
-    Calls pages, cluts;
-    scan(exe, tr.page_loader, pages);
-    scan(exe, tr.clut_loader, cluts);
-    std::vector<std::vector<uint8_t>> page_chunks, clut_chunks;
     const std::string t = std::to_string(tr.n);
-    const std::string sfx = cond.suffix;
-    auto last = [](const std::vector<int>& v) { return v.empty() ? size_t(SIZE_MAX) : size_t(*std::max_element(v.begin(), v.end())); };
-    if (!disc.chunks("T" + t + "PAGE/T" + t + "PAGE" + sfx, page_chunks) || !disc.chunks("T" + t + "CLUT/T" + t + "CLUT" + sfx, clut_chunks) ||
-        last(pages.image_chunks) >= page_chunks.size() || last(cluts.clut_chunks) >= clut_chunks.size()) {
-        snprintf(line, sizeof(line), "texture pages: %zu loads for %zu chunks, CLUTs: %zu for %zu\n", pages.images.size(),
-                 page_chunks.size(), cluts.cluts.size(), clut_chunks.size());
-        log += line;
-        return false;
-    }
-    // The page loader (func_80039A88) loads the whole .DAT into one buffer, steps through it by the .SIZ's sizes and
-    // uploads each chunk with its fixed RECT whatever the chunk's size: the night set's chunk 28 is 64 x 28 texels
-    // against the RECT's 64 x 32, so its last 4 rows are read from the start of chunk 29, as here.
-    std::vector<uint8_t> page_data;
-    std::vector<size_t> page_at;
-    for (const auto& c : page_chunks) {
-        page_at.push_back(page_data.size());
-        page_data.insert(page_data.end(), c.begin(), c.end());
-    }
     Vram vram;
-    for (size_t k = 0; k < pages.images.size(); k++) {
-        auto [x, y, w, h] = pages.images[k];
-        const size_t at = page_at[size_t(pages.image_chunks[k])];
-        if (x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > 1024 || y + h > 512 || at + 0x28 + size_t(w) * h * 2 > page_data.size()) {
-            log += "a texture page's RECT is outside VRAM\n";
-            return false;
-        }
-        const uint8_t* c = &page_data[at + 0x28];
-        for (int r = 0; r < h; r++) {
-            for (int i = 0; i < w; i++) vram.v[size_t(y + r) * 1024 + size_t(x + i)] = u16(&c[2 * (size_t(r) * w + i)]);
-        }
-    }
-    // Each call's own chunk (Calls), both upload functions counted: track 2's loader puts chunks 10 and 26 up with
-    // clut_upload_dark. Taking only clut_upload_shaded's calls as the chunks in order gave every Embarcadero CLUT from
-    // the 11th on a later chunk's colors, and left the tunnel's two CLUTs empty (transparent).
-    for (size_t k = 0; k < cluts.cluts.size(); k++) {
-        auto [x, y] = cluts.cluts[k];
-        const auto& c = clut_chunks[size_t(cluts.clut_chunks[k])];
-        if (x < 0 || y < 0 || x + 16 > 1024 || y >= 512 || c.size() < 40) return false;
-        for (int i = 0; i < 16; i++) vram.v[size_t(y) * 1024 + size_t(x + i)] = u16(&c[8 + 2 * i]);
-    }
+    if (!load_vram(disc, exe, tr, cond.suffix, vram, log)) return false;
     if (!exe.in(tr.tex_table, tex_entries * 24) || !exe.in(clut_ids, clut_id_count * 4)) return false;
     auto entry = [&](uint32_t i, int f) { return s32(&exe.data[tr.tex_table - exe_base + i * 24 + f * 4]); };
     auto clut_id = [&](int i) { return int(exe.w(clut_ids + uint32_t(i) * 4)); };
@@ -1768,6 +1778,81 @@ static bool build_condition(const ps1::Disc& disc, const std::filesystem::path& 
                  ramps, grounds.size(), walls.size(), base_walls.size());
         report.push_back(line);
     }
+    // Curbs across the road: a ground polygon standing straight up (normal y under 0.2) between a floor at its top and
+    // a floor at its foot, rising 0.2-1.5 ft. Embarcadero's street under the overpass meets a slab 0.79 ft higher (PS1
+    // road chunk 53, track.glb z -1489.9 m, x 1236-1272) along such a face, right across all four AI lanes. Rush 2
+    // lifts a wheel onto it in one step at 220 mph: in a headless race 2 of 21 crossings threw the car 22-26 ft up
+    // with 75 mph lost and flipped it, the race's only wrecks (user report 2026-11-14; docs/sfrush_ps1.md#collision).
+    // Its foot is moved out over the lower floor so it becomes a ramp of 1 in 40 (31 ft for that curb), as long as that
+    // floor runs under all of it; the drawn curb is left as it is. On the PS1 disc only Embarcadero's faces (the slab
+    // and a 0.79 ft box beside the street at x 636-649) qualify.
+    size_t curb_ramps = 0;
+    {
+        constexpr double min_rise = 0.2, max_rise = 1.5, ramp_slope = 1.0 / 40.0;
+        // Whether a ground polygon other than `skip` has its surface within tol of y at (x, z).
+        auto floor_near = [&](size_t skip, double x, double z, double y, double tol) {
+            for (size_t i = 0; i < grounds.size(); i++) {
+                if (i == skip) continue;
+                const Ground& gr = grounds[i];
+                for (int k = 0; k < gr.tri_count; k++) {
+                    const V3& p0 = gr.p[gr.tris[k][0]];
+                    const V3& p1 = gr.p[gr.tris[k][1]];
+                    const V3& p2 = gr.p[gr.tris[k][2]];
+                    V3 on = a49::cross(p1 - p0, p2 - p0);
+                    if (std::fabs(on[1]) < 1e-9) continue;
+                    auto side = [&](const V3& a, const V3& b) { return (b[0] - a[0]) * (z - a[2]) - (b[2] - a[2]) * (x - a[0]); };
+                    double s0 = side(p0, p1), s1 = side(p1, p2), s2 = side(p2, p0);
+                    if (!((s0 >= 0 && s1 >= 0 && s2 >= 0) || (s0 <= 0 && s1 <= 0 && s2 <= 0))) continue;
+                    if (std::fabs(p0[1] - (on[0] * (x - p0[0]) + on[2] * (z - p0[2])) / on[1] - y) < tol) return true;
+                }
+            }
+            return false;
+        };
+        for (size_t i = 0; i < grounds.size(); i++) {
+            Ground& gr = grounds[i];
+            V3 n = a49::cross(gr.p[1] - gr.p[0], gr.p[2] - gr.p[0]);
+            if (a49::norm(n) < 1e-9) continue;
+            n = a49::unit(n);
+            if (std::fabs(n[1]) >= 0.2) continue;
+            double lo = 1e9, hi = -1e9;
+            for (int c = 0; c < gr.n; c++) {
+                lo = std::min(lo, gr.p[c][1]);
+                hi = std::max(hi, gr.p[c][1]);
+            }
+            double rise = hi - lo;
+            if (rise < min_rise || rise > max_rise) continue;
+            // Every corner on the top or the foot; the face's horizontal normal and its top edge's middle.
+            V3 top{ 0, 0, 0 }, foot{ 0, 0, 0 };
+            int nt = 0, nf = 0;
+            for (int c = 0; c < gr.n; c++) {
+                if (gr.p[c][1] > hi - 0.05) { top = top + gr.p[c]; nt++; }
+                else if (gr.p[c][1] < lo + 0.05) { foot = foot + gr.p[c]; nf++; }
+            }
+            if (nt == 0 || nf == 0 || nt + nf != gr.n) continue;
+            top = top * (1.0 / nt);
+            foot = foot * (1.0 / nf);
+            double hl = std::hypot(n[0], n[2]);
+            double hx = n[0] / hl, hz = n[2] / hl;
+            // The upper floor lies on one side of the top edge, 1 ft out; the ramp goes the other way.
+            bool plus_up = floor_near(i, top[0] + hx, top[2] + hz, hi, 0.2);
+            bool minus_up = floor_near(i, top[0] - hx, top[2] - hz, hi, 0.2);
+            if (plus_up == minus_up) continue;
+            double s = plus_up ? -1.0 : 1.0, len = rise / ramp_slope;
+            bool under = true;
+            for (double f : { 0.25, 0.5, 0.75, 1.0 }) {
+                if (!floor_near(i, foot[0] + s * hx * len * f, foot[2] + s * hz * len * f, lo, 0.3)) under = false;
+            }
+            if (!under) continue;
+            for (int c = 0; c < gr.n; c++) {
+                if (gr.p[c][1] < lo + 0.05) {
+                    gr.p[c][0] += s * hx * len;
+                    gr.p[c][2] += s * hz * len;
+                }
+            }
+            curb_ramps++;
+        }
+    }
+    if (curb_ramps) report.push_back(std::to_string(curb_ramps) + " curb faces across a floor made ramps of 1 in 40");
     if (b_records) report.push_back(std::to_string(b_records) + " raised walls (B records), each over its own height band");
     // Ground by surface (FLAGS & 0x18: road, dirt, grass, water). The grass class (the park's grass and sand shoulders)
     // is the custom surface VERGE (track.toml below): COL_GRASS stores wheel material 2, which is Rush 2's water and
@@ -1801,8 +1886,8 @@ static bool build_condition(const ps1::Disc& disc, const std::filesystem::path& 
             m.tris.push_back({ base, base + 1, base + 2 });
         }
     }
-    // Walls: the PS1's have no height; each becomes a face from 10 ft under the ground beside it to 40 ft over it, cut
-    // short under any other ground above (a street over a tunnel).
+    // Walls: the PS1's have no height; each becomes a face from 10 ft under the ground beside it to 1000 ft over it, cut
+    // short under any other ground above (a street over a tunnel) or close behind it.
     size_t steps = 0, lifted_walls = 0;
     {
         Mesh& m = by_surface["WALL"];
@@ -1881,12 +1966,65 @@ static bool build_condition(const ps1::Disc& disc, const std::filesystem::path& 
                     hi = std::max(hi, grounds[i].p[c][1]);
                 }
             }
+            // No corner that close: the chunk's ground is a few big polygons (Embarcadero's corner onto the climb to
+            // the hill loop, glb x 779-794 z -1435 to -1416 m: a 79 ft wall closing the gap between the bend's outer
+            // wall and the climb's, all of chunk 39's corners farther off; without it cars at speed ran through the
+            // gap and off the edge behind, user report 2026-11-14). Take the ground polygons whose outline comes within
+            // 60 ft of the wall, its own chunk's first, else any chunk's. 25 walls on Golden Gate, Embarcadero and
+            // Market were dropped before.
+            auto outline_dist = [&](const Ground& gr) {
+                auto seg_seg = [](V2 p0, V2 p1, V2 q0, V2 q1) {
+                    auto pt_seg = [](V2 p, V2 a, V2 b) {
+                        double dx = b[0] - a[0], dz = b[1] - a[1], l2 = dx * dx + dz * dz;
+                        double t = l2 > 0 ? std::clamp(((p[0] - a[0]) * dx + (p[1] - a[1]) * dz) / l2, 0.0, 1.0) : 0.0;
+                        return std::hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dz);
+                    };
+                    auto cross = [](V2 o, V2 a, V2 b) { return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]); };
+                    double d1 = cross(p0, p1, q0), d2 = cross(p0, p1, q1), d3 = cross(q0, q1, p0), d4 = cross(q0, q1, p1);
+                    if (((d1 > 0) != (d2 > 0)) && ((d3 > 0) != (d4 > 0))) return 0.0;
+                    return std::min({ pt_seg(p0, q0, q1), pt_seg(p1, q0, q1), pt_seg(q0, p0, p1), pt_seg(q1, p0, p1) });
+                };
+                double best = 1e18;
+                bool inside = false;
+                for (int c = 0; c < gr.n; c++) {
+                    const V3& p = gr.p[c];
+                    const V3& q = gr.p[(c + 1) % gr.n];
+                    best = std::min(best, seg_seg(w.a, w.b, { p[0], p[2] }, { q[0], q[2] }));
+                    // Crossing test of the wall's start against this edge (inside the outline).
+                    if ((p[2] > w.a[1]) != (q[2] > w.a[1]) &&
+                        w.a[0] < (q[0] - p[0]) * (w.a[1] - p[2]) / (q[2] - p[2]) + p[0])
+                        inside = !inside;
+                }
+                return inside ? 0.0 : best;
+            };
+            for (int pass = 0; pass < 2 && lo > hi; pass++) {
+                for (size_t i = 0; i < grounds.size(); i++) {
+                    if (pass == 0 && chunk_of_ground[i] != w.chunk) continue;
+                    if (outline_dist(grounds[i]) > 60.0) continue;
+                    for (int c = 0; c < grounds[i].n; c++) {
+                        lo = std::min(lo, grounds[i].p[c][1]);
+                        hi = std::max(hi, grounds[i].p[c][1]);
+                    }
+                }
+            }
             if (lo > hi) continue;
-            double bottom = lo - 10.0, top = hi + 40.0;
+            // The PS1 tests an A wall at any height, so the face stands wall_height over the ground: a car jumping
+            // can't clear it. Capped at 40 ft over the ground, jumps cleared walls the N64 holds (its building faces
+            // reach 80-190 ft; Embarcadero's lane-side walls had a median top 37 ft over the road against the N64's
+            // 81 ft, user report 2026-11-14).
+            constexpr double wall_height = 1000.0;
+            double bottom = lo - 10.0, top = hi + wall_height;
+            // Higher ground behind the wall (its back, away from the road it faces) within 30 ft cuts it 3 ft under
+            // that ground, as before, so a street running along its back keeps it out of its way. Ground in front
+            // of it doesn't: a car on a street climbing beside the wall is still held by it.
+            const double fnx = w.normal[0], fnz = w.normal[1];
             for (size_t i = 0; i < grounds.size(); i++) {
                 for (int c = 0; c < grounds[i].n; c++) {
-                    double y = grounds[i].p[c][1];
-                    if (y > hi + 8.0 && y < top + 3.0 && seg_dist(grounds[i].p[c]) < 30.0) top = std::max(hi + 5.0, y - 3.0);
+                    const V3& p = grounds[i].p[c];
+                    double y = p[1];
+                    double front = (p[0] - w.a[0]) * fnx + (p[2] - w.a[1]) * fnz;
+                    if (front > -1.0) continue;
+                    if (y > hi + 8.0 && y < top + 3.0 && seg_dist(p) < 30.0) top = std::max(hi + 5.0, y - 3.0);
                 }
             }
             // Ground passing over the wall's line whose corners are all far from it: Market's street at 61.7 ft, one
@@ -3652,6 +3790,131 @@ static bool build_condition(const ps1::Disc& disc, const std::filesystem::path& 
     return true;
 }
 
+// The PlayStation's night art for the N64 NIGHT versions' buildings (docs/sfrush_ps1.md#n64-night-art):
+// assets/sfrush_ps1/n64_night_map.json (tools/sfrush_ps1/n64_night_map.py) maps each N64 building texture (by its
+// key) onto PS1 page texels of the same art: a track, a page, a CLUT and an affine from the texture's texel centers to
+// page texels. Each is sampled here from that track's night set (nearest texel, page coordinates wrapping as the GPU's
+// do) into n64_night_art.bin, which src/rush1/track1_convert.cpp night_track draws the textures in: "N64NIGHT", u32
+// count, then per texture u64 key, u16 width, u16 height and the texels as RGBA5551 (little endian; alpha 0: the
+// PS1's texel there is see-through). Empty when the map can't be read. An entry with "variant_of" is a palette
+// variant of that entry's texture (the same texels, another TLUT): it takes only the lit windows of that map, the
+// night texels of luma 110 or more (n64_night_map.py LIT_LUMA), and keeps its own night colors elsewhere (alpha 0).
+// "crops": [key, rows] of the texture's top rows (a list may load fewer rows than the texture is drawn with), each
+// written as an entry of its own with those rows. An entry with "windows" is picked by hand for a texture the PS1 has
+// no art for: its lit glass as runs [x, y, w, 1, window], each window pale or warm as the PS1's lit windows are
+// (their texels cluster at those two), the rest left to the texture's own night colors. "clip": [x, y, w, h], the
+// part of the texture the PS1's art is kept to (a map whose art runs into something else there; its variants too).
+// The SNOW versions' art (docs/sfrush_ps1.md#n64-snow-versions): the night's maps and n64_snow_map.json's (roads,
+// grass, roofs: the textures the night's doesn't hold) through the snow set, in n64_night_art.bin's form (no hand-lit
+// windows or palette variants, which are the night's).
+std::vector<uint8_t> ps1::n64_snow_art(const Disc& disc, const std::filesystem::path& assets_dir, std::string& log) {
+    return n64_art(disc, assets_dir, "S", log);
+}
+
+std::vector<uint8_t> ps1::n64_night_art(const Disc& disc, const std::filesystem::path& assets_dir, std::string& log) {
+    return n64_art(disc, assets_dir, "N", log);
+}
+
+// The art of every map from the set `set` ("N" night, "S" snow); hand-lit windows and palette variants only at night.
+std::vector<uint8_t> ps1::n64_art(const Disc& disc, const std::filesystem::path& assets_dir, const char* set, std::string& log) {
+    const bool night_set = std::string(set) == "N";
+    std::vector<uint8_t> text = rush2::upscale::read_file(assets_dir / "n64_night_map.json");
+    nlohmann::json map = nlohmann::json::parse(text.begin(), text.end(), nullptr, false);
+    if (!map.is_object()) {
+        log += "n64_night_map.json couldn't be read: the N64 night versions light windows by guess\n";
+        return {};
+    }
+    // The snow's: also n64_snow_map.json, the maps of the textures the night's doesn't hold (roads, grass, roofs).
+    if (!night_set) {
+        std::vector<uint8_t> more = rush2::upscale::read_file(assets_dir / "n64_snow_map.json");
+        nlohmann::json snow = nlohmann::json::parse(more.begin(), more.end(), nullptr, false);
+        if (snow.is_object()) {
+            for (const auto& [k, v] : snow.items()) if (!map.contains(k)) map[k] = v;
+        }
+    }
+    Exe exe;
+    if (!exe.open(disc)) return {};
+    std::map<int, Vram> night;
+    std::vector<uint8_t> out = { 'N', '6', '4', 'N', 'I', 'G', 'H', 'T', 0, 0, 0, 0 };
+    uint32_t count = 0;
+    auto put = [&](uint64_t v, int bytes) { for (int k = 0; k < bytes; k++) out.push_back(uint8_t(v >> (8 * k))); };
+    // The PS1 night art's lit-window colors (n64_night_map.py: its lit texels cluster at these).
+    static constexpr std::array<std::array<uint8_t, 3>, 2> lights{ { { 214, 220, 221 }, { 216, 206, 126 } } };
+    auto record = [&](const std::string& k, int w, int rows, const std::vector<uint16_t>& texels) {
+        put(std::stoull(k, nullptr, 16), 8);
+        put(uint64_t(w), 2);
+        put(uint64_t(rows), 2);
+        for (size_t i = 0; i < size_t(w) * rows; i++) put(texels[i], 2);
+        count++;
+    };
+    auto crops = [&](const nlohmann::json& entry, int w, int h, const std::vector<uint16_t>& texels) {
+        if (!entry.contains("crops") || !entry["crops"].is_array()) return;
+        for (const auto& c : entry["crops"]) {
+            if (c.is_array() && c.size() == 2 && c[0].is_string() && c[1].is_number_integer() && c[1].get<int>() > 0 &&
+                c[1].get<int>() < h) record(c[0].get<std::string>(), w, c[1].get<int>(), texels);
+        }
+    };
+    for (const auto& [key, entry] : map.items()) {
+        if (!entry.is_object()) continue;
+        if (!night_set && (entry.contains("windows") || entry.contains("variant_of"))) continue;
+        if (entry.contains("windows") && entry.contains("size")) {
+            const int w = entry["size"][0].get<int>(), h = entry["size"][1].get<int>();
+            if (w <= 0 || h <= 0 || w > 1024 || h > 1024) continue;
+            std::vector<uint16_t> texels(size_t(w) * h, 0);
+            uint64_t seed = std::stoull(key, nullptr, 16);
+            for (const auto& r : entry["windows"]) {
+                if (!r.is_array() || r.size() < 5) continue;
+                const int x = r[0].get<int>(), y = r[1].get<int>(), n = r[2].get<int>(), win = r[4].get<int>();
+                const auto& c = lights[size_t(((seed >> 7) + uint64_t(win) * 0x9E3779B9ull) >> 3 & 1)];
+                for (int k = 0; k < n; k++) {
+                    if (x + k < 0 || x + k >= w || y < 0 || y >= h) continue;
+                    texels[size_t(y) * w + x + k] = uint16_t((c[0] >> 3) << 11 | (c[1] >> 3) << 6 | (c[2] >> 3) << 1 | 1);
+                }
+            }
+            record(key, w, h, texels);
+            crops(entry, w, h, texels);
+            continue;
+        }
+        const bool variant = entry.contains("variant_of");
+        if (variant && (!entry["variant_of"].is_string() || !map.contains(entry["variant_of"].get<std::string>()))) continue;
+        const nlohmann::json& e = variant ? map[entry["variant_of"].get<std::string>()] : entry;
+        if (!e.is_object() || !e.contains("affine") || !e.contains("size") || !e.contains("page")) continue;
+        const int t = e.value("track", 0);
+        auto tr = std::find_if(std::begin(tracks), std::end(tracks), [&](const TrackInfo& x) { return x.n == t; });
+        if (tr == std::end(tracks)) continue;
+        if (!night.count(t) && !load_vram(disc, exe, *tr, set, night[t], log)) {
+            night.erase(t);
+            continue;
+        }
+        const Vram& v = night[t];
+        const auto a = e["affine"].get<std::vector<double>>();
+        const int w = e["size"][0].get<int>(), h = e["size"][1].get<int>();
+        const int px = e["page"][0].get<int>(), py = e["page"][1].get<int>(), clut = e.value("clut", 0);
+        if (a.size() != 6 || w <= 0 || h <= 0 || w > 1024 || h > 1024) continue;
+        std::array<int, 4> keep{ 0, 0, w, h };
+        if (entry.contains("clip") && entry["clip"].is_array() && entry["clip"].size() == 4) {
+            for (int k = 0; k < 4; k++) keep[size_t(k)] = entry["clip"][size_t(k)].get<int>();
+        }
+        std::vector<uint16_t> texels;
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                const double s = x + 0.5, tt = y + 0.5;
+                const int u = int(std::floor(a[0] * s + a[1] * tt + a[4])) & 255, vv = int(std::floor(a[2] * s + a[3] * tt + a[5])) & 255;
+                auto c = v.texel(px, py, clut, u, vv);
+                if (variant && 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2] < 110.0) c[3] = 0;
+                if (x < keep[0] || y < keep[1] || x >= keep[0] + keep[2] || y >= keep[1] + keep[3]) c[3] = 0;
+                texels.push_back(uint16_t((c[0] >> 3) << 11 | (c[1] >> 3) << 6 | (c[2] >> 3) << 1 | (c[3] ? 1 : 0)));
+            }
+        }
+        record(key, w, h, texels);
+        crops(entry, w, h, texels);
+    }
+    for (int k = 0; k < 4; k++) out[size_t(8 + k)] = uint8_t(count >> (8 * k));
+    log += std::string(night_set ? "n64_night_art.bin: " : "n64_snow_art.bin: ") + std::to_string(count) +
+           " N64 textures (and their top rows) in the PS1's " + (night_set ? "night" : "snow") + " art\n";
+    return out;
+}
+
 bool ps1::build_track(const Disc& disc, const std::filesystem::path& assets_dir, ModFiles& out, std::string& log,
                       const N64Lanes& n64, const N64Scene& n64_embarcadero) {
     for (const TrackInfo& tr : tracks) {
@@ -3661,6 +3924,53 @@ bool ps1::build_track(const Disc& disc, const std::filesystem::path& assets_dir,
             const std::vector<uint8_t>* lanes = nullptr;
             if (tr.n >= 1 && tr.n <= 3 && !n64[size_t(tr.n - 1)].empty()) lanes = &n64[size_t(tr.n - 1)];
             if (!build_condition(disc, assets_dir, out, log, tr, c, lanes, tr.n == 2 ? &n64_embarcadero : nullptr)) return false;
+        }
+    }
+    // The N64 courses the PS1 doesn't have (its tracks 4-7) as NIGHT versions in the PS1's night look
+    // (docs/sfrush_ps1.md#n64-night-versions), when the N64 ROM is in: no track of their own, only a track.toml raced on
+    // the N64 course ([track] base), converted in the night set's colors with lit windows and a night sky
+    // (src/rush1/track1_convert.cpp night_track), with the PS1 night versions' fog and car light. Listed while the Games
+    // tab's N64 Night Versions option is on (src/track_mod/track_mod.cpp base_usable).
+    if (!n64[0].empty()) {
+        static const struct { const char* id; const char* name; int n; } courses[] = {
+            { "downtown", "Downtown", 4 }, { "the_heights", "The Heights", 5 }, { "sunset", "Sunset", 6 }, { "the_rock", "The Rock", 7 },
+        };
+        const std::array<double, 3> ratio = night_light(disc);
+        char light[8];
+        auto channel = [&](int k) { return int(std::lround(ratio[size_t(k)] * 255.0)); };
+        snprintf(light, sizeof(light), "#%02x%02x%02x", channel(0), channel(1), channel(2));
+        for (const auto& c : courses) {
+            const std::string folder = std::string(c.id) + "_night";
+            out["tracks/" + folder + "/track.toml"] = a49::text_bytes(
+                "[track]\nname = \"" + std::string(c.name) + " Night\"\nbase = \"sfrush:" + c.id + "\"\n"
+                "author = \"San Francisco Rush, N64, in the PlayStation's night look\"\n"
+                "description = \"Track " + std::to_string(c.n) + " of the N64 San Francisco Rush at night\"\n\n"
+                "[look]\nrecolor = \"night\"\nfog_color = \"#080808\"\ncar_light = \"" + light + "\"\n\n"
+                "[menu]\nafter = \"sfrush\"\nvariant_of = \"sfrush:" + c.id + "\"\nvariant = \"NIGHT\"\n");
+            log += "wrote tracks/" + folder + "/track.toml: N64 track " + std::to_string(c.n) + " at night, car light " + light + "\n";
+        }
+        // SNOW versions of the same courses (docs/sfrush_ps1.md#n64-snow-versions): the course in the PS1's snow (its
+        // day fog and sky, snow painted into the textures: src/rush1/track1_convert.cpp snow_track), with falling snow.
+        // Off for now (user 2026-11-14): not written until the snow art and the AI's snow tuning are finished.
+        constexpr bool n64_snow_versions = false;
+        for (const auto& c : courses) {
+            if (!n64_snow_versions) break;
+            const std::string folder = std::string(c.id) + "_snow";
+            out["tracks/" + folder + "/track.toml"] = a49::text_bytes(
+                "[track]\nname = \"" + std::string(c.name) + " Snow\"\nbase = \"sfrush:" + c.id + "\"\n"
+                "author = \"San Francisco Rush, N64, in the PlayStation's snow\"\n"
+                "description = \"Track " + std::to_string(c.n) + " of the N64 San Francisco Rush in the snow\"\n\n"
+                "[look]\nrecolor = \"snow\"\nsnowfall = 1\n\n"
+                "[menu]\nafter = \"sfrush\"\nvariant_of = \"sfrush:" + c.id + "\"\nvariant = \"SNOW\"\n");
+            log += "wrote tracks/" + folder + "/track.toml: N64 track " + std::to_string(c.n) + " in the snow\n";
+        }
+        // Their buildings in the PS1's own night art, and the snow's (src/track_mod/track_mod.cpp prepare hands them
+        // to the conversion).
+        std::vector<uint8_t> art = ps1::n64_night_art(disc, assets_dir, log);
+        if (!art.empty()) out["n64_night_art.bin"] = std::move(art);
+        if (n64_snow_versions) {
+            std::vector<uint8_t> snow = ps1::n64_snow_art(disc, assets_dir, log);
+            if (!snow.empty()) out["n64_snow_art.bin"] = std::move(snow);
         }
     }
     return true;

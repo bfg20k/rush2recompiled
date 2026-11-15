@@ -296,6 +296,10 @@ the road and whatever else is round them from where the lamps really are on the 
   near black (luminance under 0.1). Rush 2049's fog table (main 0x80114658, 3 bytes per track) is gray-blue for the
   day tracks (0.55-0.61) and black for race tracks 4 and 6 (Presidio) and the stunt and battle arenas; the SF Rush
   PlayStation night versions set #080808. Covered sections of day tracks (car state +0x344) are left out.
+- **Buses:** SF Rush Sunset's eight traffic buses (src/rush1/track1_buses.cpp, `track1::bus_pose`) get headlamps
+  too on its NIGHT version, with the same option: BUSO1's two lamps under its orange band (x +-5.3, y 2.9, z 20 ft
+  in the model's axes, read off its front), always on, markers only (no lens glow), drawn from battle_render slots
+  324-331 placed with each bus's pose (trampolines 0x80E1F380, 32 bytes a bus). 2026-11-14, user request.
 - **When:** headlamps always (at night); tail lamps dim to drive by (a fifth of full) and full while Rush 2 lights the
   car's brake lights itself (braking, the car's flags 0x1000 set and 0x10 clear: func_800599A0, read in its hook
   `rush2_calspeed_brake_lights`). A lamp goes out once its corner's panel is damaged at all (panels 0 front right,
@@ -396,7 +400,11 @@ ambient occlusion):
      over, y and z within 2 units; `carLightOf`) light in one pass: both shaded, from their midpoint and half the gap
      along the car's side (`dirW.w`), one march toward the midpoint. Light under 0.002 (brightest channel) is dropped,
      and light under 0.03 skips the march (its shadow wouldn't show on a night track's dark surfaces).
-     Intensity x shape x Lambert (normal from the depth buffer) / (d^2 + 1), d in feet, windowed to
+     Intensity x shape x Lambert / (d^2 + 1), d in feet, windowed to nothing at the reach. The Lambert normal comes
+     from the full resolution depth buffer one pixel away each way, across and down each from the side whose depth is
+     nearer the pixel's own, and only where the light before Lambert is worth drawing. (It was cross(ddx, ddy) of the
+     position: at half resolution that spans a 2 x 2 quad, 4 full resolution pixels, and a quad straddling an outline
+     or crease gave its whole 4 x 4 block a normal mixed from both surfaces: blocky light along every edge.) Windowed to
      nothing at the reach ((1 - (d / reach)^4)^2). Intensities: headlamp 15000, tail lamp 14 (braking). A headlamp is
      a low-beam spot: Gaussian falloff in tangents off its axis, 0.52 across, 0.065 below, 0.025 above (a sharp top
      cut), so the long pool on the road comes from the grazing angle. A tail lamp is a lobe ((0.3 + 0.7 cos)^2)
@@ -414,10 +422,19 @@ ambient occlusion):
 2. The scene is copied (`copyTexture`, same format and samples) and `CarLightCompositePS` writes scene + albedo x
    light + glow over the lamps' area, per sample with multisampling, leaving pixels no lamp reached alone. The light
    is upsampled from the half resolution pixels round each pixel (the one at half its position, and on an odd row or
-   column the next along): their average where they agree within a tenth, otherwise each weighed by how near its own
-   pixel's depth is to this one's (exp(-40 x relative w gap), the nearest alone if none is near), so light doesn't
-   bleed across a car's outline. The albedo
-   is estimated: scene / level (the marker's, 110 / 255), never under 0.015, so a black surface still lifts a little.
+   column the next along): their bilinear average, unless the sample is on an edge: its w more than 10% (relative)
+   off its first light pixel's, or, where the light pixels disagree by more than a tenth, off one of the others' (a
+   surface at a grazing angle changes far less per pixel; light varying over one surface stays bilinear: testing the
+   light alone sent most of the road down the edge path, 0.77 ms). On an edge every light pixel within 3 full resolution pixels (3 x 3 to 4 x 4 of
+   them; the light target is cleared two past the area for it) is weighed by a tent 4 pixels wide times how near its
+   own pixel's depth is to this sample's (exp(-40 x relative w gap), the nearest alone if none is near), so light
+   doesn't bleed across a car's outline and each sample of an antialiased edge pixel takes light from its own surface:
+   the light's edge follows the scene's at full resolution. (With only the bilinear set an even pixel had just its own
+   light pixel, and its other samples took the other surface's light: a stepped edge.) A dark first light pixel doesn't
+   discard an edge sample. The albedo
+   is estimated: scene / level (the marker's, 110 / 255), never under 0.015, so a black surface still lifts a little,
+   and never over 1 (uncapped, a car's paint or lane paint brighter than the level reflected more than all the light
+   and the cars in a beam went white).
    The light is first compressed, light / (1 + its brightest channel / 1.5), so a surface right in front of a lamp is
    lit to at most 1.5 times its albedo instead of going flat white (the beam washed the scene out without it). A
    shoulder over the brightest channel, from 0.8 or the scene's own brightest channel if higher, scales all three
@@ -426,6 +443,28 @@ ambient occlusion):
 
 The pipelines are made with the shader library at startup and the targets on a view's first lamps, so nothing hitches
 when a light first appears.
+
+### Particles in the beams
+
+Wheel dust, smoke and spray are see-through and write no depth, so the composite used to light them as the road
+behind them: that surface's light (its distance and angle to the lamp, the full beam close in) times the puff's own
+color taken for an albedo, and a puff in a beam went flat white. They are lit as a cloud instead:
+
+- **Which draws:** each race car's particles are a ring of 48 scene nodes (indices, s32) at +0x64 of its car record
+  (`rush2::car_types::car_states`, 0x134 a car, +0x124 the next one used), each thrown by
+  `particle_emitter_spawn_8008270C` (callback `particle_spawn_explosion_8005AEA4` at the state's +0x18, the node
+  index at +0x8). While any lamp is lit, `rush2_car_lights_view` marks those nodes (`rush2::car_lights::particle_node`)
+  and the scene walk's matrix hook (`rush2_interp_node_matrix`, src/interpolation.cpp) puts
+  `gEXSetParticleLight(node + 1)` after each one's G_MTX; its pop, the next node's matrix, a world polygon or the
+  view's end puts `gEXSetParticleLight(0)`. A new id starts a new draw, so each puff is a draw of its own.
+- **RT64:** a marked draw records where it is from the camera (its world transform's origin, the interpolated frame's)
+  and its view (`triangles.particle`, `particleRel`). It is held back until the view's 3D draws end (`finish3D` in
+  `submitRasterScene`), drawn after the car light composite, with `RasterParams::particleLight` set from the lamps of
+  its own view's markers: each light pass's lamp (or mirrored pair) evaluated at the puff with CarLightPS's shape,
+  falloff and window but no Lambert term or shadow march, eased as the composite eases a surface's light
+  (/ (1 + peak / 1.5)), times 0.5 (`ParticleScatter`). RasterPS adds albedo x that light to the combiner's color (the
+  albedo its color / level, at most 1) and applies the composite's shoulder, so a tan puff brightens toward a lighter
+  tan and gray smoke toward a light gray, never past white.
 
 ### Car lights GPU cost
 
@@ -464,6 +503,12 @@ texels near it as the lens).
 or not) and each change of what is lit; `RUSH2_CAR_LIGHTS_TEST=1` lights every car's tail lamps as if braking. For
 example `python tools/test_race.py 17 --cars 0 --seconds 46 --shots 40,44 --env RUSH2_CAR_LIGHTS_TEST=1` (a new build
 spends its first launch's first 30 s rebuilding caches, so shots at 40 s and later land in the race).
+
+Particles in the beams: `RUSH2_TEST_PARTICLE_LIGHT=0` leaves the particles unmarked (the composite lights them as
+the road behind, as before) to compare. The Heights night version's start is a pack kicking tire smoke and then dirt
+just ahead of the player: `python tools/test_race.py the_heights_night --drones 7 --user-settings --data tmp/pl_data
+--env RUSH2_RACE_RECORD=<absolute path> --shots 24.5,25,25.5 --seconds 29`, once with the switch and once without
+(racing starts about 22 s in on a warm launch).
 
 ## Sky fog
 
