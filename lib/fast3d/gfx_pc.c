@@ -2209,7 +2209,7 @@ static void dbg_end_frame(void) {
                 "%.0f texture imports, %.1f cache misses, %.1f replacement uploads\n",
                 dbg_time.frames, dbg_time.run_ns / f / 1e6, dbg_time.flushes / f, dbg_time.imports / f,
                 dbg_time.misses / f, dbg_time.uploads / f);
-        fprintf(stderr, "[fast3d]   timed frame: draw submits %.2f ms, texture imports %.2f ms, vertex loads %.2f ms, "
+        if (dbg_time.tri_ns) fprintf(stderr, "[fast3d]   timed frame: draw submits %.2f ms, texture imports %.2f ms, vertex loads %.2f ms, "
                 "triangles %.2f ms (submits and imports inside), texture rects %.2f ms\n",
                 dbg_time.flush_ns / 1e6, dbg_time.import_ns / 1e6, dbg_time.vertex_ns / 1e6,
                 dbg_time.tri_ns / 1e6, dbg_time.rect_ns / 1e6);
@@ -2511,7 +2511,11 @@ struct GfxRenderingAPI *gfx_get_current_rendering_api(void) {
 
 void gfx_begin_frame(void) {
     replacement_uploads = 0;
-    dbg_op_timing = (dbg.frame + 1) % 300 == 0;
+    // The detailed breakdown reads the clock per triangle, which hitches the frame it is on, so it is off unless asked for
+    // (RUSH2_F3D_TIMING_DETAIL=1); the plain per-frame averages stay on.
+    static int detail = -1;
+    if (detail < 0) { const char *e = getenv("RUSH2_F3D_TIMING_DETAIL"); detail = e && *e && *e != '0'; }
+    dbg_op_timing = detail && (dbg.frame + 1) % 300 == 0;
     dbg_begin_frame();
     gfx_rapi->start_frame();
 }
