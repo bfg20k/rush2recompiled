@@ -87,6 +87,9 @@ namespace {
     }
 
     // What the tracks are built from: the ROMs, their options and settings, the enabled mods.
+    std::atomic<bool> quitting{ false }; // Set at exit: the polling loop in run() ends
+    std::timed_mutex poll_mutex;           // Held by the loop while it polls
+
     std::string tracks_signature() {
         auto r49 = rush2::wings::get_rom();
         auto cs = rush2::calspeed::get_rom();
@@ -250,8 +253,12 @@ namespace {
             rush2::car_mods::prepare();
             prepare_tracks();
         }
-        while (true) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+        while (!quitting) {
+            for (int i = 0; i < 20 && !quitting; i++) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            // Held while polling: the exit handler (start) takes it, so exit waits for a poll in progress (bounded)
+            // and the thread never reads the mod list or the ROMs while the statics they live in are destroyed.
+            std::unique_lock poll{ poll_mutex };
+            if (quitting) break;
             if (auto now = rush2::wings::get_rom(); now != r49) {
                 r49 = now;
                 if (r49 != nullptr) rush2::car2049::prepare(*r49);
@@ -274,6 +281,11 @@ void rush2::prewarm::start(const std::u8string& game_id) {
     static bool started = false;
     if (started) return;
     started = true;
+    // At exit, stop the polling thread before the statics it reads (the mod list) are destroyed: it crashed there.
+    std::atexit([] {
+        quitting = true;
+        if (poll_mutex.try_lock_for(std::chrono::seconds(3))) poll_mutex.unlock();
+    });
     std::thread(run, game_id).detach();
 }
 
