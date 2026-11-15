@@ -458,7 +458,7 @@ namespace {
         std::copy(m.begin(), m.begin() + sfrush_courses, p.sfrush.begin());
         std::copy(m.begin() + first_rush2049, m.begin() + first_stunt, p.rush2049.begin());
         std::copy(m.begin() + first_stunt, m.begin() + first_ps1, p.stunt2049.begin());
-        std::copy(m.begin() + first_ps1, m.end(), p.sfrush_ps1.begin());
+        std::copy(m.begin() + first_ps1, m.begin() + courses, p.sfrush_ps1.begin()); // Not m.end(): the Rush 2 extra bits follow the courses
         return p;
     }
 }
