@@ -42,9 +42,7 @@ namespace {
     };
     std::map<std::string, std::unordered_map<uint64_t, PackFile>> g_packs; // by pack id
     std::deque<std::pair<uint64_t, std::filesystem::path>> g_queue;       // hash, file
-    // Never destroyed: the loader thread is detached and sleeps on this at exit, and destroying a condition variable
-    // that has a waiter blocks forever in exit() (the freeze on quit).
-    std::condition_variable& g_queue_changed = *new std::condition_variable();
+    std::condition_variable g_queue_changed;
     bool g_loader_started = false;
 
     void loader_loop() {
