@@ -1179,9 +1179,6 @@ static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_id
     if (tex_width == 0) tex_width = 1;
     if (tex_height == 0) tex_height = 1;
     
-    // A replacement image is sampled with each texel of the game's texture on the middle of its block of the image, so
-    // the half-texel shift below (which is in the game's texels) doesn't apply.
-    const bool prim_replaced = rendering_state.textures[used_textures[0] ? 0 : 1] != NULL && rendering_state.textures[used_textures[0] ? 0 : 1]->replaced;
     bool z_is_from_0_to_1 = gfx_rapi->z_is_from_0_to_1();
     
     for (int i = 0; i < 3; i++) {
@@ -1197,8 +1194,11 @@ static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_id
         if (use_texture) {
             float u = (v_arr[i]->u * tile_shift_scale(prim_tile->shifts) - prim_tile->uls * 8) / 32.0f;
             float v = (v_arr[i]->v * tile_shift_scale(prim_tile->shiftt) - prim_tile->ult * 8) / 32.0f;
-            if ((rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT && !rect_point && !in_rect && !prim_replaced) {
-                // Linear filter adds 0.5f (not for rectangles, below) to the coordinates
+            if ((rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT && !rect_point && !in_rect) {
+                // Linear filter adds 0.5f (not for rectangles, below) to the coordinates. A replacement image gets the
+                // same shift: the N64 samples texel i at s = i, so (s + 0.5) / width is the middle of texel i's block of
+                // the image (RT64's "center" shift, which a half-texel-short sample turned into hairlines at wrapped
+                // edges: yellow lines on the walls, a black line on a hood, signs off by half a texel).
                 u += 0.5f;
                 v += 0.5f;
             }

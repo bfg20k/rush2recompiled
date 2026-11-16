@@ -101,8 +101,10 @@ before this bridge mod cars looked low resolution under it.
 - `import_texture` calls `drawn` once per cached texture (again the first time it is drawn in 3D), then `replace`. The
   texture cache node remembers the hash and the serial shown; when the generation changes a node re-checks, so a
   replacement the derive worker finishes later swaps in, and a removed one decodes the game's texture again.
-- A replaced texture skips the half-texel shift of linear filtering (RT64's "centered" replacements), and at most two
-  replacement uploads happen per frame so a burst spreads over a few frames.
+- A replaced texture gets the same half-texel shift as the game's own (`(s + 0.5) / width`, the middle of each game texel's
+  block of the image: RT64's "center" shift). Skipping it (the first version did) put every replacement half a game texel
+  off: hairlines where a wrapping texture meets its far edge, shifted signs. At most two replacement uploads happen per
+  frame so a burst spreads over a few frames.
 - Strip regions (`ReplacementRegion`) are cut from the source image at lookup time using the sampled size recorded by `drawn`.
 - Offline check: `RUSH2_F3D_TEST_REPLACE=1 tools/f3d_replay frame.bin out.ppm` replaces every 3D texture with a checker
   (only two per frame because of the upload budget). The real replacements exist only in game, so the final check is
