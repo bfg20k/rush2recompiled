@@ -1122,6 +1122,14 @@ static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_id
     // cycle holds the fields: cycle 2 in two-cycle mode, cycle 1 otherwise.
     const uint32_t m2a_shift = two_cycle ? 20 : 22, m2b_shift = two_cycle ? 16 : 18;
     bool use_alpha = ((rdp.other_mode_l >> m2a_shift) & 3) == 1 /*G_BL_CLR_MEM*/ && ((rdp.other_mode_l >> m2b_shift) & 3) == 0 /*G_BL_1MA*/;
+    // Coverage from alpha (ALPHA_CVG_SEL without FORCE_BL): the AA opaque modes (P*A + M*A_MEM) take their coverage from
+    // the combiner's alpha, so a texel with alpha below 1 only partly covers the pixel and blends with what is under it.
+    // Rush 2's car sheen layers (the window glass and the "fake specular" streaks, CI4 textures with soft alpha) are drawn
+    // that way; treating them as opaque painted their dark texels over the body as black blotches.
+    if (!use_alpha && (rdp.other_mode_l & ALPHA_CVG_SEL) && !(rdp.other_mode_l & (CVG_X_ALPHA | FORCE_BL)) &&
+        ((rdp.other_mode_l >> m2a_shift) & 3) == 1 /*G_BL_CLR_MEM*/ && ((rdp.other_mode_l >> m2b_shift) & 3) == G_BL_A_MEM) {
+        use_alpha = true;
+    }
     bool use_fog = (rdp.other_mode_l >> 30) == G_BL_CLR_FOG;
     // Alpha cutouts: coverage-times-alpha modes and the alpha-compare threshold both discard transparent texels.
     bool texture_edge = (rdp.other_mode_l & CVG_X_ALPHA) == CVG_X_ALPHA || (rdp.other_mode_l & 3) == 1 /*G_AC_THRESHOLD*/;

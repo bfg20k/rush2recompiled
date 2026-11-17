@@ -132,3 +132,13 @@ The hitch profiler (RUSH2_HITCH_LOG) is Windows only; on Linux this line and `pe
 The timing line has a second line breaking the display list time down: vertex loads, triangles (draw submits and texture
 imports are inside it) and texture rects. Texture imports on a cache hit cost the hash of the texture's bytes
 (`gfx_texture_key`), now eight bytes a step. The texture cache holds 4096 textures; at 512 a 2049 track emptied it every frame.
+
+## Coverage from alpha (car sheen)
+
+A blender ending in `A_MEM` is normally opaque (AA opaque modes), but with `ALPHA_CVG_SEL` set and `FORCE_BL` and
+`CVG_X_ALPHA` clear the RDP takes the pixel's coverage from the combiner's alpha, so a texel with alpha below 1 only
+partly covers the pixel and blends with what is under it. Rush 2's car sheen layers (CI4 32x32 textures, combine
+`001FFE4F020A2D12`, othermode low word `C8112230`: the window glass and the "fake specular" streaks over the body, drawn
+after the body) use exactly that. Fast3D treated them as opaque, which painted their dark texels over the car as black
+blotches on the windows and lost the highlights; `gfx_pc.c` now alpha-blends that combination (`use_alpha`). Seen in
+`f3d_frame_1220` (Compact on Select Car, flushes 43 and 61-68 are the sheen layers).

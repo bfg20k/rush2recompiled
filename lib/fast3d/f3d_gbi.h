@@ -118,6 +118,8 @@ typedef struct Gfx {
 #define Z_UPD 0x00000020
 #define ZMODE_DEC 0x00000C00
 #define CVG_X_ALPHA 0x00001000
+#define ALPHA_CVG_SEL 0x00002000
+#define FORCE_BL 0x00004000
 #define G_BL_CLR_FOG 3
 #define G_BL_A_MEM 1
 
