@@ -142,3 +142,15 @@ partly covers the pixel and blends with what is under it. Rush 2's car sheen lay
 after the body) use exactly that. Fast3D treated them as opaque, which painted their dark texels over the car as black
 blotches on the windows and lost the highlights; `gfx_pc.c` now alpha-blends that combination (`use_alpha`). Seen in
 `f3d_frame_1220` (Compact on Select Car, flushes 43 and 61-68 are the sheen layers).
+
+## BRANCH_Z: the game's level-of-detail switch
+
+Cars (and probably other objects) pick a detail level with F3DEX2 `BRANCH_Z` (opcode 0x04), preceded by `RDPHALF_1` (the
+target DL). `gSPBranchLessZraw(dl, vtx, zval)`: if vertex `vtx`'s screen depth is at or below `zval` (16.16, in the
+viewport's 0..1023 range: `ndc z * 511 + 511`) the DL jumps (no return) to `dl`; otherwise the following commands run.
+A cascade of two (near threshold first, then a farther one) gives three levels: near, medium, and the fall-through far
+level. Fast3D skipped the command, so it always drew the farthest, lowest detail level (small textures: the rear banner
+of the Exotic was a 32x4 smear instead of the 64x20 "ALL-STICK" decal). Implemented in `gfx_pc.c`;
+`RUSH2_F3D_BRANCHZ_DBG=1` prints each branch with the screen depth and threshold. Seen in `f3d_frame_3720` (Exotic on
+Select Car: depth 921.5, thresholds 852.7 and 938.0, so the medium level). The screen depth formula is from the
+thresholds' scale and has not been checked against hardware beyond that frame.

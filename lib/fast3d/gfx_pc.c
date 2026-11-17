@@ -902,6 +902,7 @@ static float gfx_adjust_x_for_aspect_ratio(float x) {
     return x * (4.0f / 3.0f) / ((float)gfx_current_dimensions.width / (float)gfx_current_dimensions.height);
 }
 
+static uint32_t rdp_half1; // last RDPHALF_1 word
 static void gfx_sp_vertex_impl(size_t n_vertices, size_t dest_index, const void *vertices);
 static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const void *vertices) {
     const uint64_t start = dbg_op_timing ? dbg_now_ns() : 0;
@@ -2473,7 +2474,30 @@ static void gfx_run_dl(Gfx* cmd) {
             case G_SETCIMG:
                 gfx_dp_set_color_image(C0(21, 3), C0(19, 2), C0(0, 11), seg_addr(cmd->words.w1));
                 break;
-            case 0xE0: case 0xE1: case 0xE6: case 0xE7: case 0xE8: case 0xE9: case 0xF1: // no-op, half words, syncs
+            case 0xE1: // RDPHALF_1: the target of the BRANCH_Z that follows
+                rdp_half1 = cmd->words.w1;
+                break;
+            case 0x04: { // F3DEX2 BRANCH_Z: the game's level-of-detail switch. If the vertex's screen depth is at or below
+                         // the threshold, jump (no return) to the DL in RDPHALF_1; otherwise the commands that follow
+                         // (the farthest, lowest detail version) run. Screen depth is the viewport's 0..1023 range, in
+                         // 16.16 in the threshold (the game's viewport is G_MAXZ 0x3FF, scale and translation 0x1FF).
+                const uint32_t vi = (cmd->words.w0 & 0xFFF) / 2;
+                if (vi < MAX_VERTICES && rsp.loaded_vertices[vi].w > 0.0f) {
+                    const struct LoadedVertex *bv = &rsp.loaded_vertices[vi];
+                    const double screen_z = (double)(bv->z / bv->w) * 511.0 + 511.0;
+                    const bool take = screen_z <= (double)cmd->words.w1 / 65536.0;
+                    if (getenv("RUSH2_F3D_BRANCHZ_DBG")) {
+                        fprintf(stderr, "[fast3d] BRANCH_Z vtx %u: ndc z %.4f screen z %.2f threshold %.2f -> %s %08x\n",
+                                vi, bv->z / bv->w, screen_z, cmd->words.w1 / 65536.0, take ? "taken" : "not taken", rdp_half1);
+                    }
+                    if (take && rdp_half1 != 0) {
+                        cmd = (Gfx *)seg_addr(rdp_half1);
+                        --cmd; // increased after the switch
+                    }
+                }
+                break;
+            }
+            case 0xE0: case 0xE6: case 0xE7: case 0xE8: case 0xE9: case 0xF1: // no-op, half words, syncs
             case 0xF9: // blend color, not modelled
                 break;
             default:
