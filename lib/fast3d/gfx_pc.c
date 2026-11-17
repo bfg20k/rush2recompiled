@@ -1126,8 +1126,10 @@ static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_id
     // Coverage from alpha (ALPHA_CVG_SEL without FORCE_BL): the AA opaque modes (P*A + M*A_MEM) take their coverage from
     // the combiner's alpha, so a texel with alpha below 1 only partly covers the pixel and blends with what is under it.
     // Rush 2's car sheen layers (the window glass and the "fake specular" streaks, CI4 textures with soft alpha) are drawn
-    // that way; treating them as opaque painted their dark texels over the body as black blotches.
-    if (!use_alpha && (rdp.other_mode_l & ALPHA_CVG_SEL) && !(rdp.other_mode_l & (CVG_X_ALPHA | FORCE_BL)) &&
+    // that way; treating them as opaque painted their dark texels over the body as black blotches. Only draws with texture
+    // LOD on (the sheen cross-fades two mip tiles): the car body layers share the blender word but must stay opaque, their
+    // alpha-0 palette entries are solid black on the real thing (taking them as holes showed the road through the cars).
+    if (!use_alpha && (rdp.other_mode_h & (1u << 16) /*G_TL_LOD*/) && (rdp.other_mode_l & ALPHA_CVG_SEL) && !(rdp.other_mode_l & (CVG_X_ALPHA | FORCE_BL)) &&
         ((rdp.other_mode_l >> m2a_shift) & 3) == 1 /*G_BL_CLR_MEM*/ && ((rdp.other_mode_l >> m2b_shift) & 3) == G_BL_A_MEM) {
         use_alpha = true;
     }

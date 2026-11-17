@@ -140,7 +140,11 @@ A blender ending in `A_MEM` is normally opaque (AA opaque modes), but with `ALPH
 partly covers the pixel and blends with what is under it. Rush 2's car sheen layers (CI4 32x32 textures, combine
 `001FFE4F020A2D12`, othermode low word `C8112230`: the window glass and the "fake specular" streaks over the body, drawn
 after the body) use exactly that. Fast3D treated them as opaque, which painted their dark texels over the car as black
-blotches on the windows and lost the highlights; `gfx_pc.c` now alpha-blends that combination (`use_alpha`). Seen in
+blotches on the windows and lost the highlights; `gfx_pc.c` now alpha-blends that combination (`use_alpha`), but only
+for draws with texture LOD on (`other_mode_h` bit 16, which the sheen layers have). The car body layers share the same
+blender word (`C8112230`) with alpha taken from 1-bit palette entries; taking those alpha-0 texels as holes showed the road
+through the cars (gaps on the Exotic's lower body, the Bandit's side missing), so they stay opaque. That split is
+empirical (it matches the emulator), not derived from the RDP's pipeline. Seen in
 `f3d_frame_1220` (Compact on Select Car, flushes 43 and 61-68 are the sheen layers).
 
 ## BRANCH_Z: the game's level-of-detail switch
