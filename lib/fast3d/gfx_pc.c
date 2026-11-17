@@ -468,6 +468,11 @@ static void tile_dims(const struct TileDesc *t, uint32_t *x0, uint32_t *y0, uint
     }
     if (t->maskt != 0 && (1u << t->maskt) < hh) {
         hh = 1u << t->maskt;
+    } else if (t->maskt != 0 && t->cmt == 0 && hh < (1u << t->maskt) && (1u << t->maskt) <= max_h) {
+        // A wrapping tile reads its whole mask height whatever the size window says (the window only limits clamped
+        // tiles). The car sheen layers (window glass) set SETTILESIZE to a single row (lrt = ult = 0) over a 64 row
+        // wrapping tile, the CPU-written reflection image; a one row texture gave them the first row, all alpha 0.
+        hh = 1u << t->maskt;
     }
     // The RDP subtracts the tile's (uls, ult) from every texture coordinate, and LOADTILE / LOADBLOCK store from the
     // tile's TMEM origin, so the image always starts at TMEM row 0 / column 0 of the tile. A tile whose size window starts
@@ -647,6 +652,12 @@ static void import_texture_impl(int slot) {
         gfx_import_unsupported(slot); // a tile that was never set up
         return;
     }
+    dbg_read_env();
+    if (dbg_env_flush_verts != NULL) {
+        fprintf(stderr, "[fast3d] tile for flush %d slot %d: fmt=%u siz=%u line=%u tmem=%u uls=%d lrs=%d ult=%d lrt=%d dims=%ux%u tmem0:", dbg_flush_no, slot, t->fmt, t->siz, t->line, t->tmem, (int)t->uls, (int)t->lrs, (int)t->ult, (int)t->lrt, w, h);
+        for (int i = 0; i < 16; i++) fprintf(stderr, " %02x", tmem[t->tmem * 8 + i]);
+        fprintf(stderr, "\n");
+    }
     bool cached = gfx_texture_cache_lookup(slot, &rendering_state.textures[slot], gfx_texture_key(t, x0, y0, w, h), t->fmt, t->siz);
     struct TextureHashmapNode *node = rendering_state.textures[slot];
     if (cached) {
@@ -682,6 +693,11 @@ static void import_texture_impl(int slot) {
     dbg_read_env();
     if (dbg_env_flush_verts != NULL) {
         fprintf(stderr, "[fast3d] import texture slot %d for flush %d: fmt=%u siz=%u line=%u tmem=%u size=%ux%u pal=%u tlut=%u\n", slot, dbg_flush_no, t->fmt, t->siz, t->line, t->tmem, w, h, t->palette, (rdp.other_mode_h >> 14) & 3);
+        if (t->fmt != G_IM_FMT_CI) {
+            fprintf(stderr, "[fast3d]   tmem row0:");
+            for (int i = 0; i < 16; i++) fprintf(stderr, " %02x", tmem[t->tmem * 8 + i]);
+            fprintf(stderr, " cache=%d\n", (int)cached);
+        }
         if (t->fmt == G_IM_FMT_CI) {
             fprintf(stderr, "[fast3d]   tlut[0..15]:");
             for (int i = 0; i < 16; i++) fprintf(stderr, " %04x", tlut[(t->siz == G_IM_SIZ_8b ? 0 : t->palette * 16) + i]);

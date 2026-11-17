@@ -158,3 +158,11 @@ of the Exotic was a 32x4 smear instead of the 64x20 "ALL-STICK" decal). Implemen
 `RUSH2_F3D_BRANCHZ_DBG=1` prints each branch with the screen depth and threshold. Seen in `f3d_frame_3720` (Exotic on
 Select Car: depth 921.5, thresholds 852.7 and 938.0, so the medium level). The screen depth formula is from the
 thresholds' scale and has not been checked against hardware beyond that frame.
+
+## Wrapping tiles read their whole mask height (car window glass)
+
+The car glass layers (combine `001FF1FFF3FFE3F4`, omL `C8104E50`, alpha from TEXEL0) load a 4 KB I4 reflection image (a CPU-written
+buffer, `SETTIMG 804D85A8`, LOADBLOCK 0x7FF) into a tile with `masks=7 maskt=6` and wrap, but SETTILESIZE names a single row
+(`lrt = ult = 0`). The window only limits clamped tiles, so `tile_dims()` now extends a wrapping tile's height to its mask
+(when it fits TMEM). Before this the glass sampled row 0 (all alpha 0) and drew nothing, leaving the body texture's black window
+painted in as blotches. `RUSH2_F3D_FLUSH_VERTS=1` prints `tile for flush N slot S` with the window, size and first TMEM bytes.
