@@ -155,6 +155,7 @@ static struct RenderingState {
     bool depth_mask;
     bool decal_mode;
     bool alpha_blend;
+    bool import_alpha[2]; // the slot's texture was imported for a draw that reads its alpha (see import_uses_alpha)
     struct XYWidthHeight viewport, scissor;
     struct ShaderProgram *shader_program;
     struct TextureHashmapNode *textures[2];
@@ -630,6 +631,7 @@ static void notify_drawn(const struct TileDesc *t, struct TextureHashmapNode *n)
     n->gen = tex_hooks->generation ? tex_hooks->generation() : 0;
 }
 
+static bool import_uses_alpha = true; // the draw being set up reads the texture's alpha (blend or cutout)
 static void import_texture_impl(int slot);
 static void import_texture(int slot) {
     const uint64_t start = dbg_op_timing ? dbg_now_ns() : 0;
@@ -658,7 +660,7 @@ static void import_texture_impl(int slot) {
         for (int i = 0; i < 16; i++) fprintf(stderr, " %02x", tmem[t->tmem * 8 + i]);
         fprintf(stderr, "\n");
     }
-    bool cached = gfx_texture_cache_lookup(slot, &rendering_state.textures[slot], gfx_texture_key(t, x0, y0, w, h), t->fmt, t->siz);
+    bool cached = gfx_texture_cache_lookup(slot, &rendering_state.textures[slot], gfx_texture_key(t, x0, y0, w, h) ^ (import_uses_alpha ? 0 : 0x9E3779B97F4A7C15ULL), t->fmt, t->siz);
     struct TextureHashmapNode *node = rendering_state.textures[slot];
     if (cached) {
         if (tex_hooks == NULL || !node->has_hash) {
@@ -759,7 +761,10 @@ static void import_texture_impl(int slot) {
             }
         }
     }
-    if ((t->fmt == G_IM_FMT_RGBA && t->siz == G_IM_SIZ_16b) || (t->fmt == G_IM_FMT_CI && !tlut_is_ia16())) {
+    // The bleed hides the dark fringe of a filtered cutout. A draw that ignores the texture's alpha paints those texels as
+    // they are (the car body layers: the window glass is alpha 0 in the paint texture, drawn dark navy), and a bleed would
+    // spread the paint colour into the window edge.
+    if (import_uses_alpha && ((t->fmt == G_IM_FMT_RGBA && t->siz == G_IM_SIZ_16b) || (t->fmt == G_IM_FMT_CI && !tlut_is_ia16()))) {
         bleed_transparent_texels(rgba, w, h);
     }
     if (dbg_env_dump_tex && atoi(dbg_env_dump_tex) == dbg_flush_no && (!dbg_env_dump_slot || atoi(dbg_env_dump_slot) == slot)) {
@@ -1180,9 +1185,11 @@ static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_id
     
     for (int i = 0; i < 2; i++) {
         if (used_textures[i]) {
-            if (rdp.textures_changed[i]) {
+            import_uses_alpha = use_alpha || texture_edge;
+            if (rdp.textures_changed[i] || import_uses_alpha != rendering_state.import_alpha[i]) {
                 gfx_flush();
                 import_texture(i);
+                rendering_state.import_alpha[i] = import_uses_alpha;
                 rdp.textures_changed[i] = false;
             }
             const struct TileDesc *st = &rdp.tiles[(tex_level + i) & 7];

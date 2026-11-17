@@ -166,3 +166,11 @@ buffer, `SETTIMG 804D85A8`, LOADBLOCK 0x7FF) into a tile with `masks=7 maskt=6` 
 (`lrt = ult = 0`). The window only limits clamped tiles, so `tile_dims()` now extends a wrapping tile's height to its mask
 (when it fits TMEM). Before this the glass sampled row 0 (all alpha 0) and drew nothing, leaving the body texture's black window
 painted in as blotches. `RUSH2_F3D_FLUSH_VERTS=1` prints `tile for flush N slot S` with the window, size and first TMEM bytes.
+
+## Transparent-texel colour bleed only for draws that read alpha
+
+`bleed_transparent_texels()` copies neighbouring colours into alpha-0 texels so a filtered cutout has no dark fringe. The car body
+layers (`C8112230`, no blend, no alpha compare) ignore the paint texture's alpha: the window glass is alpha 0 there and is drawn as
+its own dark navy palette entry. Bleeding turned the window edges into paint colour (yellow Concept, ragged window shapes).
+`import_uses_alpha` (blend or cutout draw) now gates the bleed, and the texture cache key and `import_alpha[slot]` keep the two
+variants of a texture apart. Replay frame: Concept, frame 1060.
