@@ -18,6 +18,7 @@
 #include <iterator>
 #include <map>
 
+#include "fancy_ufo.h"
 #include "sfrush_ps1.h"
 #include "../arcade2049/arcade_internal.h"
 
@@ -64,7 +65,8 @@ namespace {
     constexpr double car_size = 0.8184;
     // Rush 2's range across and up: the widest of its cars (all but the secret ROCKET, as ps1_physics's roster), the
     // CADDY at 6.62 ft, and the tallest, the DEW at 5.12 (each intact model's extent, tools/car_mod.py rush2_car). At
-    // car_size the Starsky and Police are 7.0 ft wide and the UFO 10.2 ft across, so each car is shrunk further,
+    // car_size the Starsky and Police are 7.0 ft wide and the UFO 10.2 ft across, so each car is shrunk further (not the UFO:
+    // rush2::fancy_ufo::ps1_fit, it stays 10.2 ft),
     // wheels with it, by as much as its width or height needs to fit; the others keep car_size. Length is free: the
     // City Bus keeps its 18.7 ft (a bus is long; the user's call, against fitting it to the CADDY's 15.0).
     constexpr double rush2_max_width = 6.625, rush2_max_height = 5.125;
@@ -184,9 +186,50 @@ namespace {
         return top;
     }
 
+    // The police car's roof lights (docs/sfrush_ps1.md#police-lights): with PIGGY picked (special car 7) the car
+    // lights pass (0x80044C18-0x80044D14, after the cars' tail and head lights) draws two glow sprites
+    // (func_80041C58) at (-16, -38, -18) and (16, -38, -18), 0.1 ft in its car frame (x across, y down, z ahead): the
+    // first with ART/LIGHT.GFX's CLUT (red), the second with ART/LIGHTB.GFX's (blue), each a 3.2 ft square flat in the
+    // car's x-y plane. Their brightness (the sprite's color) is (frame & 31) x 8 and ((frame - 16) & 31) x 8, frame the
+    // race clock at 0x800B2818 (gp+0x148, 61 counts a second): each brightens over 32 counts and goes dark, half a
+    // cycle apart. As the car's .json "flashers" (src/car_flashers.cpp), in the glb's space: the car frame's x is the
+    // glb's turned over (the red sprite sits over the red half of the roof bar's lens, glb x +10, as the PSV models'
+    // own -y; the blue over the blue half), y up from the model's origin and lifted with it, z ahead; the color each
+    // CLUT's brightest entry.
+    // The lights' frame isn't the model's: its origin is about 1.1 ft over the PSV model's (the model is drawn that much
+    // lower). Measured against the cars' own tail lights (0x800A8FA8, y down): PIGGY's entry y -2 against its lamp
+    // faces' middle +9.2 (11.2), STARSKY -13 against -0.5 (12.5), BBUS -5 against 5.5 (10.5). Taken as PIGGY's own,
+    // 11 tenths, the flares' middles then sit on the roof bar's top edge (-26.2) as the PS1 draws them. Without it they
+    // floated 1.1 ft over the bar.
+    constexpr int light_frame_drop = 11;
+    // And 4 tenths lower still (the user's call, 2026-11-15: on the top edge they read as a little too high): the flares'
+    // middles on the middle of the bar's lenses (y -23; the bar runs -26.2 to -19.1).
+    constexpr int police_flare_lower = 4;
+    constexpr int special_police = 7;
+    constexpr double police_flash_period = 32.0 / 61.0;
+    nlohmann::json police_flashers(const ps1::Disc& disc, double size, double lift) {
+        const double to16 = 1.6 * size;   // 0.1 ft to 1/16 ft
+        nlohmann::json out = nlohmann::json::array();
+        const struct { const char* file; int x; double phase; } lights[2] = { { "ART/LIGHT.GFX", -16, 0.0 },
+                                                                              { "ART/LIGHTB.GFX", 16, 0.5 } };
+        for (const auto& l : lights) {
+            std::vector<uint8_t> d;
+            if (!disc.read(l.file, d) || d.size() < 40) return nullptr;
+            uint16_t c = uint16_t(d[8 + 30] | d[8 + 31] << 8);   // CLUT entry 15
+            auto five = [](int v) { return (v << 3) | (v >> 2); };
+            out.push_back({ { "at", { -l.x * to16, (38 - light_frame_drop - police_flare_lower) * to16 + lift, -18 * to16 } },
+                            { "color", { five(c & 31), five((c >> 5) & 31), five((c >> 10) & 31) } },
+                            { "phase", l.phase },
+                            { "size", 16 * to16 } });
+        }
+        return out;
+    }
+
     // The car as a glb: one material per texture, smooth normals (Rush 2 bakes its light into vertex colors from them).
+    // body: the car's own texture as drawn (RGBA, body_w x body_h), for its brake lights.
     std::vector<uint8_t> convert(const ps1::Disc& disc, const Car& car, const std::vector<V3>& V, const std::vector<Face>& F,
-                                 double size, double lift, size_t& tri_count, std::string& error) {
+                                 double size, double lift, size_t& tri_count, std::string& error, std::vector<uint8_t>& body,
+                                 int& body_w, int& body_h) {
         a49::Glb g("rush2-recomp src/sfrush_ps1 (PS1 SF Rush car)", false);
         struct Tex {
             int material = -1, w = 0, h = 0;
@@ -231,6 +274,7 @@ namespace {
             int image = g.image(file, a49::png(rgba, t.w, t.h));
             t.material = g.material(which == 2 ? "PS1_UNDERSIDE" : car.id, image, clear ? "MASK" : "OPAQUE", false, { 33071, 33071 });
             if (painted) g.paint_mask(t.material, g.image(std::string(file) + " paint", a49::png(mask, t.w, t.h)));
+            if (which == 0) body = rgba, body_w = t.w, body_h = t.h;
             texs[which] = t;
         }
         std::vector<a49::Glb::Prim> prims;
@@ -261,6 +305,141 @@ namespace {
             prims.push_back(std::move(p));
         }
         g.textured_mesh(car.id, prims);
+        return g.bytes();
+    }
+
+    // The tail lights' colors: the paint page CLUT entries the car textures draw their lamps in (every PS1 car is drawn
+    // with the paint page's CLUT): the lens red and the amber beside it.
+    constexpr uint8_t lens_red[3] = { 173, 41, 16 };
+    constexpr uint8_t lens_amber[3] = { 181, 90, 16 };
+
+    // Each car's brake lamps in its body texture (CARSGFX/<tex>01.GFX as converted, 256 x 64), read off the art: a color
+    // rule doesn't find them, as the same two colors are also roof flashers, stickers, lettering and body paint, and
+    // the lamps are drawn differently car to car. whole: the whole lamp lights (its red, amber and the warm shades
+    // between: one striped or rimmed lamp); otherwise only its red, the amber beside it a turn signal that stays.
+    struct LampArea {
+        const char* car;
+        int x0, y0, x1, y1;   // texels, inclusive
+        bool whole;
+    };
+    constexpr LampArea lamp_areas[] = {
+        { "PS1POLICE", 113, 45, 137, 47, false },    // red over amber (the roof flasher, y 28-31, is the same red)
+        { "PS1POLICE", 156, 44, 184, 45, false },    // the bar over the plate
+        { "PS1MINI", 108, 50, 112, 54, false },      // red under amber (the red specks at the amber's corners left out)
+        { "PS1JEEP", 55, 44, 66, 52, true },         // three red and amber striped lenses (x 52-54 is its side marker)
+        { "PS1JETCAR", 57, 41, 73, 51, true },       // a red rimmed lamp, amber and yellow inside
+        { "PS1BUS", 237, 35, 241, 36, false },       // the round lamps' red tops, amber under them
+        { "PS1BUS", 228, 43, 231, 45, false },
+        { "PS1STARSKY", 225, 56, 236, 58, false },   // red inner half, amber outer half
+    };
+
+    // The car's brake lights (docs/car_mods.md#brake-lights, issue 80) as a glb. The PS1 shows braking with a glow
+    // sprite at its table's tail light points (func_80041C58, docs/sfrush_ps1.md#snow-and-night), which didn't sit on
+    // the cars' real lights when ported, so they light as Rush 2's cars do: the lamps (lamp_areas) turned to Rush 2's
+    // lit red (palette entry 187, 0xF801) while the car brakes. The faces are the body's in its back half facing
+    // backward (normal within 60 degrees of -z) that show a lamp texel, on the body (src/car_mods.cpp lifts every brake
+    // light off it), textured with only those texels opaque. Empty when the car has none (the UFO).
+    std::vector<uint8_t> brake_lights(const Car& car, const std::vector<V3>& V, const std::vector<Face>& F, double size,
+                                      double lift, const std::vector<uint8_t>& body, int w, int h, size_t& tri_count) {
+        tri_count = 0;
+        if (w <= 0 || h <= 0 || body.size() < size_t(w) * h * 4) return {};
+        std::vector<uint8_t> lamp(size_t(w) * h, 0);
+        bool any_lamp = false;
+        for (const LampArea& a : lamp_areas) {
+            if (std::strcmp(a.car, car.id) != 0) continue;
+            for (int y = std::max(0, a.y0); y <= std::min(h - 1, a.y1); y++) {
+                for (int x = std::max(0, a.x0); x <= std::min(w - 1, a.x1); x++) {
+                    const uint8_t* p = &body[(size_t(y) * w + x) * 4];
+                    if (p[3] == 0) continue;
+                    bool red = p[0] == lens_red[0] && p[1] == lens_red[1] && p[2] == lens_red[2];
+                    bool amber = p[0] == lens_amber[0] && p[1] == lens_amber[1] && p[2] == lens_amber[2];
+                    bool warm = int(p[0]) - int(p[2]) > 60 && p[0] >= p[1];
+                    if (red || (a.whole && (amber || warm))) lamp[size_t(y) * w + x] = 1, any_lamp = true;
+                }
+            }
+        }
+        if (!any_lamp) return {};
+        auto lens = [&](int x, int y) { return lamp[size_t(y) * w + x] != 0; };
+        double z_lo = 1e9, z_hi = -1e9;
+        for (const V3& v : V) {
+            double z = dump(v, car.scale, size)[2];
+            z_lo = std::min(z_lo, z), z_hi = std::max(z_hi, z);
+        }
+        const double back_half = (z_lo + z_hi) / 2.0;
+        a49::Glb::Prim p;
+        for (const Face& f : F) {
+            if (f.tex == 2 || f.idx.size() < 3) continue;
+            std::array<double, 2> centre{};
+            for (const auto& uv : f.uv) centre[0] += uv[0] / f.uv.size(), centre[1] += uv[1] / f.uv.size();
+            // The face's normal (Newell's, over all its corners), one for its whole fan: src/car_mods.cpp lifts brake
+            // light vertices off the body along their normals (brake_lifted), and a quad's two triangles lifted along
+            // their own slightly different normals parted in a hairline crack.
+            std::vector<V3> c(f.idx.size());
+            for (size_t i = 0; i < f.idx.size(); i++) {
+                c[i] = dump(V[f.idx[i]], car.scale, size);
+                c[i][1] += lift;
+            }
+            V3 n{ 0, 0, 0 };
+            for (size_t i = 0; i < c.size(); i++) {
+                const V3& u = c[i];
+                const V3& v = c[(i + 1) % c.size()];
+                n[0] += (u[1] - v[1]) * (u[2] + v[2]);
+                n[1] += (u[2] - v[2]) * (u[0] + v[0]);
+                n[2] += (u[0] - v[0]) * (u[1] + v[1]);
+            }
+            double len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+            if (len <= 0.0) continue;
+            for (double& k : n) k /= len;
+            if (n[2] > 0) n = { -n[0], -n[1], -n[2] };   // the winding varies: take the side facing backward
+            if (n[2] > -0.5) continue;
+            for (size_t a = 1; a + 1 < f.idx.size(); a++) {
+                const size_t k3[3] = { 0, a, a + 1 };
+                const V3 q[3] = { c[0], c[a], c[a + 1] };
+                if ((q[0][2] + q[1][2] + q[2][2]) / 3.0 > back_half) continue;
+                // A lamp texel (its center) inside the face's texture triangle (the PS1 point-samples).
+                const auto& t0 = f.uv[k3[0]];
+                const auto& t1 = f.uv[k3[1]];
+                const auto& t2 = f.uv[k3[2]];
+                double d = (t1[1] - t2[1]) * (t0[0] - t2[0]) + (t2[0] - t1[0]) * (t0[1] - t2[1]);
+                if (std::fabs(d) < 1e-9) continue;
+                int x0 = std::max(0, int(std::floor(std::min({ t0[0], t1[0], t2[0] }))));
+                int x1 = std::min(w - 1, int(std::ceil(std::max({ t0[0], t1[0], t2[0] }))));
+                int y0 = std::max(0, int(std::floor(std::min({ t0[1], t1[1], t2[1] }))));
+                int y1 = std::min(h - 1, int(std::ceil(std::max({ t0[1], t1[1], t2[1] }))));
+                bool any = false;
+                for (int y = y0; y <= y1 && !any; y++) {
+                    for (int x = x0; x <= x1 && !any; x++) {
+                        double px = x + 0.5, py = y + 0.5;
+                        double l0 = ((t1[1] - t2[1]) * (px - t2[0]) + (t2[0] - t1[0]) * (py - t2[1])) / d;
+                        double l1 = ((t2[1] - t0[1]) * (px - t2[0]) + (t0[0] - t2[0]) * (py - t2[1])) / d;
+                        any = l0 >= 0 && l1 >= 0 && l0 + l1 <= 1 && lens(x, y);
+                    }
+                }
+                if (!any) continue;
+                for (int i = 0; i < 3; i++) {
+                    p.verts.push_back(q[i]);
+                    std::array<double, 2> uv = ps1::texel_inset(f.uv[k3[i]], centre);
+                    p.uvs.push_back({ uv[0] / w, uv[1] / h });
+                    p.normals.push_back(n);
+                }
+            }
+        }
+        if (p.verts.empty()) return {};
+        // The lit texture: the lamps at Rush 2's lit red, everything else clear.
+        std::vector<uint8_t> lit(size_t(w) * h * 4, 0);
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                if (!lens(x, y)) continue;
+                uint8_t* o = &lit[(size_t(y) * w + x) * 4];
+                o[0] = 255, o[3] = 255;
+            }
+        }
+        a49::Glb g("rush2-recomp src/sfrush_ps1 (PS1 SF Rush car brake lights)", false);
+        const std::string name = std::string(car.id) + "_BRAKE";
+        p.material = g.material(name, g.image(name, a49::png(lit, w, h)), "BLEND", false, { 33071, 33071 });
+        for (uint32_t k = 0; k < p.verts.size(); k += 3) p.tris.push_back({ k, k + 1, k + 2 });
+        tri_count = p.tris.size();
+        g.textured_mesh(name, { p });
         return g.bytes();
     }
 }
@@ -374,6 +553,10 @@ bool ps1::build_cars(const Disc& disc, const std::filesystem::path& assets_dir, 
             for (int i = 0; i < 2; i++) {
                 if (hi[i] > lo[i]) fit = std::min(fit, max16[i] / (hi[i] - lo[i]));
             }
+            // The UFO: not shrunk (rush2::fancy_ufo::ps1_fit), 10.2 ft across, wheel points with it. At the cap its
+            // wheel points stood two thirds as far apart as Rush 2's cars' and it tipped over too easily. Its box
+            // (the one it hits cars with) is its mesh's (car_mods.cpp box_from_model), so it grows with it.
+            if (car.special == special_ufo) fit = rush2::fancy_ufo::ps1_fit;
             half_width_ft = (hi[0] - lo[0]) * fit / 32.0;
         }
         const double size = car_size * fit, car_wheel_scale = wheel_scale * fit;
@@ -402,8 +585,10 @@ bool ps1::build_cars(const Disc& disc, const std::filesystem::path& assets_dir, 
         front[1] += lift;
         rear[1] += lift;
         std::string error;
-        size_t tris = 0;
-        std::vector<uint8_t> glb = convert(disc, car, V, F, size, lift, tris, error);
+        size_t tris = 0, brake_tris = 0;
+        std::vector<uint8_t> body;
+        int body_w = 0, body_h = 0;
+        std::vector<uint8_t> glb = convert(disc, car, V, F, size, lift, tris, error, body, body_w, body_h);
         if (glb.empty()) {
             log += std::string(car.id) + ": " + error + "\n";
             return false;
@@ -425,8 +610,22 @@ bool ps1::build_cars(const Disc& disc, const std::filesystem::path& assets_dir, 
             spec["no_wings"] = true;
             spec["no_skid_marks"] = true;
             spec["no_wheel_dust"] = true;
+            // Its origin is at the ground, under the saucer: STRIPE stays on top of the rim, off the underside and pods.
+            spec["stripes_above_widest"] = true;
         }
         if (car.paintable) spec["main_color"] = default_main_color;
+        if (car.special == special_police) {
+            nlohmann::json flashers = police_flashers(disc, size, lift);
+            if (!flashers.is_null()) {
+                spec["flashers"] = flashers;
+                spec["flash_period"] = police_flash_period;
+            }
+        }
+        std::vector<uint8_t> brake = brake_lights(car, V, F, size, lift, body, body_w, body_h, brake_tris);
+        if (!brake.empty()) {
+            out[std::string("rush2/new_cars/") + car.id + "_BRAKE.glb"] = std::move(brake);
+            spec["brakes"] = { std::string(car.id) + "_BRAKE.glb" };
+        }
         // Its name in SF Rush's lettering (tools/build_banners.py --ps1: assets/sfrush_ps1/<id>_name.png, 128 x 32).
         {
             std::ifstream f(assets_dir / (std::string(car.id) + "_name.png"), std::ios::binary);
@@ -439,8 +638,8 @@ bool ps1::build_cars(const Disc& disc, const std::filesystem::path& assets_dir, 
         }
         out[std::string("rush2/new_cars/") + car.id + ".json"] = a49::text_bytes(spec.dump(4));
         snprintf(line, sizeof(line), "%s -> %s (%s, %s): %zu triangles, wheels front (%.1f, %.1f, %.1f) rear (%.1f, %.1f, "
-                 "%.1f) x %.3f, size %.3f of the PS1's\n", car.model, car.id, car.name, note.c_str(), tris, front[0], front[1],
-                 front[2], rear[0], rear[1], rear[2], scale, size);
+                 "%.1f) x %.3f, size %.3f of the PS1's, %zu brake light triangles\n", car.model, car.id, car.name,
+                 note.c_str(), tris, front[0], front[1], front[2], rear[0], rear[1], rear[2], scale, size, brake_tris);
         log += line;
     }
     return true;

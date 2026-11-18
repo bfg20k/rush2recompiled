@@ -324,15 +324,18 @@ car's body is still the one it looked at), again when the car's type, parts or d
   with a plain wrap, the far side's lamps landed next to the middle.
 - **Tail lamps:** what the game lights when the car brakes, each texel put back on its triangle by the triangle's
   texture coordinates (barycentric): Rush 2's palette lighting's CI8 entries 161-175 (Rush 2's cars, Rush 2049's on
-  the N64 ROM); for a California Speed or Dreamcast car the texels its lit copies change
+  the N64 ROM; not on a body with brake light lists, whose stand-ins take those reds for any red or orange paint: the
+  arcade Truck's orange cab roof became two lamps, issue 88); for a California Speed or Dreamcast car the texels its lit copies change
   (`rush2::car2049::brake_light_sources`); a mod car's or livery's brake light lists (docs/car_mods.md#brake-lights),
   only those whose switch (`BrakeLightSources::switches`, `rush2::car2049::brake_switch`) is in the lists the body
   draws: a car's copy holds every paint scheme's brake lists and a livery adds its own, and taking them all put lamps
   between and beside the real ones (the first pass on the arcade Mustang's liveries). Their texels at least half as
   bright as the car's brightest brake texel count (the textures are soft glows, a red core in near black; the N64
   copy's alpha bit isn't kept reliably, the transparency comes from the full-size replacements), since those lists
-  are often textured quads spanning both lamps (the arcade Truck's covers the whole tailgate); an untextured one's
-  triangles by their area. A lit switch's call isn't walked as body. Only triangles in the back half of the body facing backward (outward normal z at most
+  are often textured quads spanning both lamps (the arcade Truck's covers the whole tailgate). A textured brake
+  triangle with none of those texels is no lamp (taken by its area, the Truck's tailgate quad made one lamp in the
+  middle, issue 88); only when no brake texel is bright enough (an all-dark brake texture) and for an untextured
+  one are the triangles taken by their area. A lit switch's call isn't walked as body. Only triangles in the back half of the body facing backward (outward normal z at most
   -0.25) count: lit texels on a side face are markers or spill, not the lamp. The texels are grouped (two are one lamp
   when nearer than 1.5 texels of the coarser triangle, never over 0.25 ft, so round lamps side by side stay apart; a
   an untextured brake light triangle's corners are always one lamp), and the groups at least 6% of all become lamps, the
@@ -355,9 +358,9 @@ car's body is still the one it looked at), again when the car's type, parts or d
   there (so a gray lens on dark paint glows and the paint doesn't); `"lens": false` for hidden lamps (rush2:2's
   closed pop-ups) or none at all (open-wheel racers). Gray headlamps (most of Rush 2049's, several of Rush 2's)
   are below the finder's 175 and come from the table.
-- **What is still missing** (no headlamp pair, no lit texels: the SF Rush PlayStation cars have no brake lights in
-  the game) gets a pair from the body's shape: 34% of its width either side of its middle, at 32% (heads) or 42%
-  (tails) of its height, on the frontmost or rearmost surface straight along z from there.
+- **What is still missing** (no headlamp pair, no lit texels: the SF Rush PlayStation UFO, the one PS1 car without
+  brake lights, docs/car_mods.md#brake-lights) gets a pair from the body's shape: 34% of its width either side of its
+  middle, at 32% (heads) or 42% (tails) of its height, on the frontmost or rearmost surface straight along z from there.
 - **Kept on disk:** `track_cache::directory()/car_lamps.bin`, every result keyed by what the body is drawn from (its
   lists' commands, its vertices, the first bytes of its textures and palettes, not palette entries 161-175, which
   braking relights) and by the build; read on a worker when the option is switched on, written on one a few seconds
@@ -495,7 +498,20 @@ lamps are measured on its glb instead (`tools/car_lamps.py glb <livery>.glb DIR/
 rush2049:<car>/<livery>`: the body sampled from its full-size textures, in the same axes): the game's dump reads the
 N64-size copies, too coarse to see a livery's lamps. Every entry's measurement is in `tools/car_lamps_picks.sh`
 (rerun it after a sweep to measure them again); `pick` writes the lens's color into the entry (the game takes the
-texels near it as the lens).
+texels near it as the lens). The sweep switches Car Lights on in its runs (`graphics.car_lights=On`): the option is
+off by default, and without it nothing is found or dumped. The PlayStation SF Rush cars and the arcade cars are mod
+glbs, measured on them the same way (`glb <car>.glb DIR/<car>.json --key "mod:<NAME>"`).
+
+The finder's headlamps change with the paint: bright, near-white texels are taken as glass, so white or silver paint,
+a white bumper or chrome trim is found instead of a gray lens (GitHub issue 79: the white Bandit, the Dreamcast GX-2's
+white bumper, the pickup's chrome bar). A car whose lamps a player reports gets a hand entry, which no paint moves.
+
+In game: `RUSH2_TEST_LOOK_BACK=1` holds every view's LOOK BACK (docs/camera.md#look-back), so a 2-4 player
+`tools/test_race.py 17 --cars a,b,c,d --env RUSH2_TEST_LOOK_BACK=1 --env RUSH2_TEST_WINDOW=3840x2160 --shots 50
+--config graphics.car_lights=On` shoots four cars' fronts at once (1080p views; a plain chase view in the tunnel start
+leaves views 2-4 over their car's roof, so shoot rear views one car a run). `tools/quad_crops.py SHOT OUT --labels
+...` cuts out each view's car, and `tools/lamp_compare.py OUT DUMP "SHOT|KEY|front|x0,y0,x1,y1"` puts a player's
+screenshot beside the car's gridded view with its lamps.
 
 ### Testing
 

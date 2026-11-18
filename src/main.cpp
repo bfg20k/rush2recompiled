@@ -167,7 +167,16 @@ ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::
     flags |= SDL_WINDOW_VULKAN;
 #endif
 
-    window = SDL_CreateWindow(rush2::program_name.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900, flags);
+    // RUSH2_TEST_WINDOW=<width>x<height>: the window's size for test runs (captures at the size a player sees).
+    int window_w = 1600, window_h = 900;
+    if (const char* size = getenv("RUSH2_TEST_WINDOW")) {
+        int w = 0, h = 0;
+        if (sscanf(size, "%dx%d", &w, &h) == 2 && w >= 320 && h >= 240) {
+            window_w = w;
+            window_h = h;
+        }
+    }
+    window = SDL_CreateWindow(rush2::program_name.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, window_w, window_h, flags);
 
     if (window == nullptr) {
         exit_error("Failed to create window: %s\n", SDL_GetError());
@@ -558,7 +567,7 @@ void reorder_texture_pack(recomp::mods::ModContext&) {
 
 // --input-script "<seconds>:<button>[:<hold seconds>],..." presses N64 buttons at fixed times after
 // launch, on top of real input (used for automated testing). Buttons: A B Z START L R CU CD CL CR DU DD DL DR, plus SL
-// and SR for the stick fully left and right (to steer), for controller 1, or with a P2-P4 prefix (P2START) for
+// and SR for the stick fully left and right (to steer) and SU and SD fully up and down (the N64's y: up +1), for controller 1, or with a P2-P4 prefix (P2START) for
 // controllers 2-4. A time written T<seconds> (T3:START) counts from when the title screen first came up (front-end
 // screen 0x10) instead, so a script through the menus doesn't depend on how long the launch takes.
 struct ScriptedPress {
@@ -567,6 +576,7 @@ struct ScriptedPress {
     uint16_t button;
     int controller;
     float stick_x = 0.0f;
+    float stick_y = 0.0f;
     bool from_title = false;
 };
 static std::vector<ScriptedPress> input_script;
@@ -610,6 +620,9 @@ static void parse_input_script(const std::string& script) {
         if (name == "SL" || name == "SR") {
             press.stick_x = name == "SL" ? -1.0f : 1.0f;
         }
+        if (name == "SU" || name == "SD") {
+            press.stick_y = name == "SU" ? 1.0f : -1.0f;
+        }
         input_script.push_back(press);
     }
 }
@@ -646,6 +659,9 @@ static bool get_n64_input(int controller_num, uint16_t* buttons, float* x, float
                 *buttons |= press.button;
                 if (press.stick_x != 0.0f) {
                     *x = press.stick_x;
+                }
+                if (press.stick_y != 0.0f) {
+                    *y = press.stick_y;
                 }
                 rush2::input::press_pedals(controller_num, press.button);
                 ret = true;

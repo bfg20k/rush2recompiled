@@ -1,6 +1,7 @@
 #ifndef __CAR2049_H__
 #define __CAR2049_H__
 
+#include "car_flashers.h"
 #include "car_lights.h"
 #include <array>
 #include <cstdint>
@@ -72,9 +73,20 @@ namespace rush2::car2049 {
     // The number of paint jobs (car select STYLEs) of a car type: a 2049 car from a Dreamcast disc has its own, any
     // other car 0.
     int paint_jobs(int type);
+    // Whether an N64 ROM's 2049 car's textures use its third paint ramp, so the car select shows TERTIARY COLOR.
+    bool has_tertiary(int type);
     // A Dreamcast disc's car's paint job color (0xRRGGBB, the disc job's paint) for MAIN COLOR `main` (its STYLE, main %
     // jobs); false for a car without paint jobs.
     bool paint_job_color(int type, int main, uint32_t& rgb);
+    // TERTIARY COLOR of an N64 ROM's 2049 car: its third paint ramp (2049's COLOR 3), a car select row of its own
+    // under ACCENT COLOR (STRIPE COLOR colors the STRIPE). Kept per profile and car type in the saves' "tertiary"
+    // section; `owner` is the profile's record address, or 1-4 for player 1-4 without one (JUST PLAY: kept for the
+    // session only). -1 when none is kept: the car takes its STRIPE COLOR, as before the row was its own (a computer
+    // car always does). docs/car_mods.md#tertiary-color.
+    int tertiary_color(uint32_t owner, int type);
+    void set_tertiary_color(uint32_t owner, int type, int color);
+    // Paints car select preview / race car `id`'s third ramp with its owner's TERTIARY COLOR (after the row changes).
+    void repaint_tertiary(uint8_t* rdram, int id);
     // A Rush 2 car type drawn as one body, as a 2049 car is (a car mod's mesh, src/car_mods.cpp): its asset (0x1D +
     // type) becomes `car`, a car container whose <prefix>FRAME1 is the body and whose other parts are empty, dented
     // by the car's panel damage like a 2049 car's body. scuffed: the body's textures' damaged copies (file offset of
@@ -133,6 +145,16 @@ namespace rush2::car2049 {
     }
     // Opens the brake light blocks branched past for the mirror walk (begin), closes them again after.
     void brake_mirror(uint8_t* rdram, bool begin);
+    // A livery's flipbook frames (its .json's "sirens": the arcade's light bars, docs/car_mods.md#sirens): each frame a
+    // list of its own, named as a model, and in each body list a switch per frame after the brake light switch: a
+    // G_NOOP holding the frame's number in its low 24 bits (siren_marker(1)), which rush2::car_mods turns into a G_DL
+    // call to the frame's list while that frame shows, then a G_NOOP holding the list's file offset (siren_marker(2)).
+    constexpr uint32_t siren_marker(int which) {
+        return 0x5C500000u | uint32_t(which);
+    }
+    inline std::array<std::pair<uint32_t, uint32_t>, 2> siren_switch(uint32_t list, int frame) {
+        return { { { uint32_t(frame) & 0xFFFFFFu, siren_marker(1) }, { list & 0xFFFFFFu, siren_marker(2) } } };
+    }
     struct ModCar {
         std::string name;              // the car select logo's text
         int base = 0;                  // Rush 2 type 0-21
@@ -157,10 +179,13 @@ namespace rush2::car2049 {
         bool wings_hidden = false;     // "no_wings": the wings work but aren't drawn (src/rush2049/wings_render.cpp)
         bool marks_hidden = false;     // "no_skid_marks": its wheels lay no tire marks (src/surface_fx.cpp)
         bool dust_hidden = false;      // "no_wheel_dust": its wheels throw no dust, smoke or spray (src/surface_fx.cpp)
+        bool stripes_above_widest = false; // "stripes_above_widest": STRIPE paints nothing below the body's widest point
         float shadow_radius = 0.0f;    // "round_shadow": a round shadow this many feet across the middle (src/mod_car_shadow.cpp); 0: the game's
         std::vector<uint8_t> logo;     // "logo": the car select name logo, an encoded 128 x 32 image; empty: lettered
         // "lights": its headlamps and tail lamps for Car Lights (src/car_lights.cpp); empty: found on the body.
         std::vector<rush2::car_lights::LampSpec> lamps;
+        // "flashers": roof lights that pulse while it races (src/car_flashers.cpp); empty: none.
+        rush2::car_flashers::Spec flashers;
     };
     // What race car `car`'s brake lights are drawn from while it brakes (src/car_lights.cpp): its textures' lit copies
     // (texels -> the lit copy, both RDRAM; the texels whose bytes differ are the lights), lit copies kept outside RDRAM

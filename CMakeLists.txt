@@ -225,6 +225,7 @@ target_sources(Rush2Recompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/sfrush_ps1/ps1_diorama.cpp
     ${CMAKE_SOURCE_DIR}/src/sfrush_ps1/ps1_cars.cpp
     ${CMAKE_SOURCE_DIR}/src/sfrush_ps1/ps1_install.cpp
+    ${CMAKE_SOURCE_DIR}/src/sfrush_ps1/fancy_ufo.cpp
     ${CMAKE_SOURCE_DIR}/lib/Clipper2/CPP/Clipper2Lib/src/clipper.engine.cpp
     ${CMAKE_SOURCE_DIR}/lib/Clipper2/CPP/Clipper2Lib/src/clipper.offset.cpp
     ${CMAKE_SOURCE_DIR}/lib/Clipper2/CPP/Clipper2Lib/src/clipper.rectclip.cpp
@@ -315,6 +316,8 @@ target_sources(Rush2Recompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/track_cache.cpp
     ${CMAKE_SOURCE_DIR}/src/track_traction.cpp
     ${CMAKE_SOURCE_DIR}/src/car_lights.cpp
+    ${CMAKE_SOURCE_DIR}/src/car_flashers.cpp
+    ${CMAKE_SOURCE_DIR}/src/car_stripes.cpp
     ${CMAKE_SOURCE_DIR}/src/snowfall.cpp
     ${CMAKE_SOURCE_DIR}/src/race_time_model.cpp
     ${CMAKE_SOURCE_DIR}/src/prewarm.cpp

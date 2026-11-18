@@ -51,7 +51,9 @@ track select read the new files without a restart; `mods_changed` also has the c
   banners (`tools/build_banners.py --arcade`; until 2026-11-05 with an " A" after the name, which the version button's
   ARCADE replaces), and their round previews are the user's in-game screenshots
   (`tools/arcade2049/previews/<id>.png`, cut by `tools/build_banners.py --arcade` into
-  `assets/arcade2049/<id>_preview.png`). Only Alcatraz sets a fog color (its night). Offline
+  `assets/arcade2049/<id>_preview.png`). Only Alcatraz sets a fog color (its night). Metro and Presidio are night tracks as their N64 courses are
+  (`[look] night = true`, so Graphics > Car Lights lights them) and keep the arcade's look, no fog color. The arcade
+  has no car shading over the ground (the N64's per-polygon colours, see roaddat.rom below): not ported. Offline
   (`tools/track_mod_test.bat` + `tools/track_mod_check.py` on the C++ output) all seven pass. Haight and Presidio
   needed the collision steps under "roaddat.rom" below (a cone tip on Haight; copies and a tunnel seam on Presidio)
   and Presidio, at 13,047 polygons, the converter's wide leaves (docs/custom_tracks.md: until 2026-10-19 the game took
@@ -469,6 +471,26 @@ These are the N64 2049 default descriptor's points (Rush 2's descriptor: y -0.8 
 
 A `COL` folder is a whole livery, not a paint color. Its texture names differ (the 'Cuda's `COL2` is a `B_` set,
 `COL8` a police car with `COP_` textures and a light bar), and some add parts (a blower, a hood scoop).
+
+### Light bars
+
+A `COL` folder can have a `dobs.rom` of its own, in the tracks' format ([dobs.rom](#dobsrom-dynamic-objects)): one
+flipbook, drawn on the car. **[V]** (the files; how the car code draws it isn't traced)
+
+| Folder | Entry | Script | Frames |
+| --- | --- | --- | --- |
+| CAR3 COL1, 3, 6 | `ROCKET` | `flipbook 20`, `alpha 2` | `ROCKET_1`-`8`, the exhaust flame (`FLAME`) |
+| CAR3 COL2 / COL4, 5 | `REDROCKET` (at (0, -5.38, 2.76)) / `GRNROCKET` | `rocketflame`, `flipbook 20`, `alpha 2` | 8 flames each (`R_FLAME`, ...) |
+| CAR4 COL7 (Magnum, NYC police) | `NYCSIREN` at 0 | `flipbook 24`, `alpha 2`, `reflect 0` | `NYCSIREN_1`-`16`: the bar (`C47_SIREN`, red and blue lenses by vertex color), frames 3-4, 7-8 with a `GS_REDLIGHT` glow on one side, 10-11, 14-15 on the other |
+| CAR7 COL8 (Bruiser, police) | `COPSIREN` at (0.01, -0.01, -0.04) | `flipbook 16`, `alpha 2`, `reflect 0` | `COPSIREN_1`-`8`: the bar (`COP_SIRENS`, the body has none of its own), 2-4 with a red glow (`GS_REDLIGHT`), 6-8 a blue one (`AL_BLULIGHT`) |
+| CAR7 COL6 (Bruiser) | `REDSIREN` at (-2.78, -0.28, 0) | `flipbook 20`, `alpha 2` | `REDSIREN_1`-`3`: a glow card (`REDLIGHT`) over the body's `R_SIREN` lamp |
+| CAR5 COL8 | `ORNAMENT` | `alpha 0`, `view2` | no flipbook (a hood ornament, not ported) |
+
+The glow textures are AYIQ8422 with soft alpha; the bars' are opaque YIQ. The entries' matrices are the identity.
+The position is in the car's axes as the vertices are, (x, y, z): REDSIREN's puts its glow card's middle at (-1.23,
+3.8, -0.9), on the body's R_SIREN lamp (-1.27, 3.79, -0.79); read as the tracks' (x, z, y) it would sit 0.3 ft high and
+back. **[I]** The arcade cars mod (src/arcade2049/arcade_cars.cpp `convert_sirens`) gives the Magnum and Bruiser
+liveries these as [sirens](car_mods.md#sirens); CAR3 (the Rocket) isn't converted, so its flames aren't either.
 
 `src/arcade2049/arcade_cars.cpp` builds the `rush2049_arcade_cars` mod (docs/car_mods.md#rush-2049-arcade-cars). Most
 arcade cars are the arcade forms of N64 cars: matched by side and top silhouette against the N64 cars' bodies (the
